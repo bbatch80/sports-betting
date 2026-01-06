@@ -1,0 +1,8 @@
+# Lambda Function Dependencies
+# Note: boto3 is provided by AWS Lambda runtime, don't include it
+
+# This function only needs boto3 (provided by Lambda) and standard library
+# No additional dependencies required
+
+
+

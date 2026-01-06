@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "Sports Betting Predictions",
+    "slug": "sports-betting-predictions",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#2196F3"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.sportsbetting.predictions"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "backgroundColor": "#2196F3"
+      },
+      "package": "com.sportsbetting.predictions"
+    },
+    "web": {}
+  }
+}
+
