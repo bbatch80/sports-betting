@@ -10,6 +10,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import HomeScreen from './src/screens/HomeScreen';
 import StrategyResultsScreen from './src/screens/StrategyResultsScreen';
+import EliteTeamsScreen from './src/screens/EliteTeamsScreen';
 
 const Stack = createStackNavigator();
 
@@ -26,11 +27,20 @@ export default function App() {
           }}
         >
           <Stack.Screen name="Home" component={HomeScreen} />
-          <Stack.Screen 
-            name="StrategyResults" 
+          <Stack.Screen
+            name="StrategyResults"
             component={StrategyResultsScreen}
             options={{
               headerShown: false,
+            }}
+          />
+          <Stack.Screen
+            name="EliteTeams"
+            component={EliteTeamsScreen}
+            options={{
+              headerShown: true,
+              headerTitle: 'Elite Teams',
+              headerBackTitle: 'Back',
             }}
           />
         </Stack.Navigator>

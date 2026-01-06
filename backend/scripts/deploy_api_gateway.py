@@ -448,7 +448,20 @@ def create_api_gateway(apigw_client, api_name, predictions_lambda_arn, predictio
             '/api/predictions/{sport}', 'predictions',
             predictions_lambda_arn, predictions_function_name, api_name
         )
-        
+
+        # Set up elite-teams endpoints (uses predictions Lambda)
+        print(f"\n  Setting up elite-teams endpoints...")
+        setup_api_resource(
+            apigw_client, api_id, api_resource_id,
+            '/api/elite-teams', 'elite-teams',
+            predictions_lambda_arn, predictions_function_name, api_name
+        )
+        setup_api_resource(
+            apigw_client, api_id, api_resource_id,
+            '/api/elite-teams/{sport}', 'elite-teams-sport',
+            predictions_lambda_arn, predictions_function_name, api_name
+        )
+
         # Set up results endpoints
         print(f"\n  Setting up results endpoints...")
         setup_api_resource(
@@ -631,6 +644,11 @@ def main():
     print(f"    {api_url}/api/predictions/nba")
     print(f"    {api_url}/api/predictions/ncaam")
     print(f"    {api_url}/api/predictions/all")
+    print(f"  Elite Teams:")
+    print(f"    {api_url}/api/elite-teams")
+    print(f"    {api_url}/api/elite-teams/nfl")
+    print(f"    {api_url}/api/elite-teams/nba")
+    print(f"    {api_url}/api/elite-teams/ncaam")
     print(f"  Results:")
     print(f"    {api_url}/api/results/nfl")
     print(f"    {api_url}/api/results/nba")
@@ -638,6 +656,7 @@ def main():
     print(f"    {api_url}/api/results/all")
     print(f"\nTest the APIs:")
     print(f"  curl {api_url}/api/predictions/nba")
+    print(f"  curl {api_url}/api/elite-teams")
     print(f"  curl {api_url}/api/results/nba")
     
     return 0

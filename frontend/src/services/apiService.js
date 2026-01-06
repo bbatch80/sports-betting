@@ -115,3 +115,37 @@ export const getAllGames = async (date = null) => {
   }
 };
 
+/**
+ * Fetch elite team opportunities
+ * Elite teams are top 25% by win% with good recent form (last 5 games)
+ * @param {string|null} sport - Optional sport key (nfl, nba, ncaam). If null, returns all sports
+ * @returns {Promise<Object>} Elite team opportunities data
+ */
+export const getEliteTeams = async (sport = null) => {
+  try {
+    // Check if API URL is configured
+    if (API_BASE_URL.includes('YOUR-API-ID')) {
+      throw new Error('API Gateway URL not configured. Please update src/constants/api.js with your API Gateway URL.');
+    }
+
+    const url = sport
+      ? `/api/elite-teams/${sport}`
+      : `/api/elite-teams`;
+    const response = await apiClient.get(url);
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching elite teams:', error);
+
+    // Provide helpful error messages
+    if (error.message && error.message.includes('API Gateway URL')) {
+      throw error;
+    } else if (error.response) {
+      throw new Error(`API Error: ${error.response.status} - ${error.response.statusText}`);
+    } else if (error.request) {
+      throw new Error('Network error: Could not reach API. Check your API Gateway URL and internet connection.');
+    } else {
+      throw new Error(error.message || 'Failed to fetch elite teams');
+    }
+  }
+};
+

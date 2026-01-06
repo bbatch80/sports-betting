@@ -20,6 +20,81 @@ BUCKET_NAME = 'sports-betting-analytics-data'
 ALLOWED_SPORTS = ['nfl', 'nba', 'ncaam']
 
 
+def get_elite_teams_from_s3(sport_key: str = None) -> Dict[str, Any]:
+    """
+    Get elite team opportunities from predictions
+
+    Args:
+        sport_key: Optional sport key. If None, returns elite teams for all sports
+    """
+    sports_to_check = [sport_key] if sport_key else ALLOWED_SPORTS
+
+    elite_teams_data = {
+        'elite_teams': [],
+        'sports': {},
+        'summary': {
+            'total_opportunities': 0,
+            'sports_with_opportunities': 0
+        }
+    }
+
+    for sport in sports_to_check:
+        s3_key = f"predictions/predictions_{sport}.json"
+
+        try:
+            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+            predictions_data = json.loads(response['Body'].read().decode('utf-8'))
+
+            # Extract elite_team strategy
+            strategies = predictions_data.get('strategies', {})
+            elite_team_strategy = strategies.get('elite_team', {})
+            opportunities = elite_team_strategy.get('opportunities', [])
+
+            if opportunities:
+                # Add sport name to each opportunity
+                for opp in opportunities:
+                    opp['sport'] = sport
+                    opp['sport_name'] = predictions_data.get('sport_name', sport.upper())
+
+                elite_teams_data['elite_teams'].extend(opportunities)
+                elite_teams_data['sports'][sport] = {
+                    'sport_name': predictions_data.get('sport_name', sport.upper()),
+                    'opportunities': opportunities,
+                    'prediction_date': predictions_data.get('prediction_date'),
+                    'summary': elite_team_strategy.get('summary', {})
+                }
+                elite_teams_data['summary']['sports_with_opportunities'] += 1
+                elite_teams_data['summary']['total_opportunities'] += len(opportunities)
+            else:
+                elite_teams_data['sports'][sport] = {
+                    'sport_name': predictions_data.get('sport_name', sport.upper()),
+                    'opportunities': [],
+                    'prediction_date': predictions_data.get('prediction_date'),
+                    'summary': elite_team_strategy.get('summary', {})
+                }
+
+        except s3_client.exceptions.NoSuchKey:
+            logger.info(f"No predictions found for {sport}")
+            elite_teams_data['sports'][sport] = {
+                'opportunities': [],
+                'error': 'No predictions available'
+            }
+        except Exception as e:
+            logger.error(f"Error reading elite teams for {sport}: {e}")
+            elite_teams_data['sports'][sport] = {
+                'opportunities': [],
+                'error': str(e)
+            }
+
+    # Sort all elite teams by last 5 spread performance (best first)
+    elite_teams_data['elite_teams'].sort(
+        key=lambda x: x.get('elite_team_last_5_spread') or 0,
+        reverse=True
+    )
+
+    return elite_teams_data
+
+
 def get_predictions_from_s3(sport_key: str, date: str = None) -> Dict[str, Any]:
     """
     Read predictions JSON from S3
@@ -102,6 +177,23 @@ def lambda_handler(event, context):
         path = event.get('path', '')
         path_parts = [p for p in path.split('/') if p]
         
+        # Check for elite-teams endpoint: /api/elite-teams or /api/elite-teams/{sport}
+        if 'elite-teams' in path_parts:
+            elite_idx = path_parts.index('elite-teams')
+            # Check if a specific sport is requested
+            sport = None
+            if len(path_parts) > elite_idx + 1:
+                sport = path_parts[elite_idx + 1].lower()
+                if sport not in ALLOWED_SPORTS:
+                    return create_response(400, {
+                        'error': 'Invalid sport',
+                        'message': f'Valid sports are: {", ".join(ALLOWED_SPORTS)}',
+                        'received': sport
+                    })
+
+            elite_teams = get_elite_teams_from_s3(sport)
+            return create_response(200, elite_teams)
+
         # Determine which sport(s) to return
         if 'all' in path_parts or (len(path_parts) >= 3 and path_parts[2] == 'all'):
             # Return all predictions
@@ -115,12 +207,12 @@ def lambda_handler(event, context):
                         'sport': sport,
                         'error': str(e)
                     }
-            
+
             return create_response(200, {
                 'message': 'All predictions',
                 'predictions': all_predictions
             })
-        
+
         # Extract sport from path (e.g., /api/predictions/nfl)
         sport = None
         if len(path_parts) >= 3:

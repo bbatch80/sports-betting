@@ -52,6 +52,10 @@ SPORTS_CONFIG = {
 DEFAULT_REGIONS = ['us']
 API_RATE_LIMIT_DELAY = 1.0
 
+# Elite team strategy configuration
+ELITE_PERCENTILE = 0.75  # Top 25% by win percentage
+GOOD_FORM_THRESHOLD = 3  # Last 5 games avg spread performance > 3
+
 
 def get_api_key() -> str:
     """Get Odds API key from AWS Secrets Manager"""
@@ -312,8 +316,156 @@ def calculate_handicap_statistics(df_completed: pd.DataFrame, handicap_points: i
     
     df_team_stats_handicap = pd.DataFrame(team_stats_handicap)
     df_team_stats_handicap = df_team_stats_handicap.sort_values('cover_pct_handicap', ascending=False)
-    
+
     return df_team_stats_handicap
+
+
+def calculate_team_standings(df_completed: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate team standings including win %, point differential, and tier
+
+    Returns DataFrame with columns:
+    - team, games, wins, win_pct, point_diff_avg, tier (Elite/Mid/Bottom)
+    """
+    all_teams = set(df_completed['home_team'].unique()) | set(df_completed['away_team'].unique())
+
+    team_stats = []
+    for team in all_teams:
+        home_games = df_completed[df_completed['home_team'] == team]
+        away_games = df_completed[df_completed['away_team'] == team]
+
+        # Calculate wins
+        home_wins = (home_games['home_score'] > home_games['away_score']).sum()
+        away_wins = (away_games['away_score'] > away_games['home_score']).sum()
+
+        # Calculate point differential
+        home_diff = (home_games['home_score'] - home_games['away_score']).sum()
+        away_diff = (away_games['away_score'] - away_games['home_score']).sum()
+
+        total_games = len(home_games) + len(away_games)
+        if total_games > 0:
+            team_stats.append({
+                'team': team,
+                'games': total_games,
+                'wins': home_wins + away_wins,
+                'win_pct': (home_wins + away_wins) / total_games,
+                'point_diff_avg': (home_diff + away_diff) / total_games
+            })
+
+    df_teams = pd.DataFrame(team_stats).sort_values('win_pct', ascending=False)
+
+    # Classify tiers based on win percentage
+    q75 = df_teams['win_pct'].quantile(ELITE_PERCENTILE)
+    q25 = df_teams['win_pct'].quantile(1 - ELITE_PERCENTILE)
+
+    df_teams['tier'] = df_teams['win_pct'].apply(
+        lambda x: 'Elite' if x >= q75 else ('Bottom' if x <= q25 else 'Mid')
+    )
+
+    return df_teams
+
+
+def calculate_recent_form(df_completed: pd.DataFrame, team_tier_map: Dict[str, str]) -> pd.DataFrame:
+    """
+    Calculate recent form (last 5 games spread performance) for each team
+
+    Returns DataFrame with columns:
+    - team, tier, last_5_avg_spread, games_count, is_good_form
+    """
+    df_sorted = df_completed.sort_values('game_date')
+    all_teams = set(df_completed['home_team'].unique()) | set(df_completed['away_team'].unique())
+
+    form_data = []
+    for team in all_teams:
+        games = []
+        for _, row in df_sorted.iterrows():
+            if row['home_team'] == team:
+                # Home team: spread_result_difference is already from home perspective
+                games.append(row['spread_result_difference'])
+            elif row['away_team'] == team:
+                # Away team: flip the sign
+                games.append(-row['spread_result_difference'])
+
+        if len(games) >= 5:
+            last_5_avg = sum(games[-5:]) / 5
+            form_data.append({
+                'team': team,
+                'tier': team_tier_map.get(team, 'Unknown'),
+                'last_5_avg_spread': last_5_avg,
+                'games_count': len(games),
+                'is_good_form': last_5_avg > GOOD_FORM_THRESHOLD
+            })
+
+    return pd.DataFrame(form_data)
+
+
+def generate_elite_team_opportunities(
+    df_standings: pd.DataFrame,
+    df_form: pd.DataFrame,
+    today_games_df: pd.DataFrame
+) -> List[Dict[str, Any]]:
+    """
+    Generate elite team opportunities - elite teams in good form with games today
+
+    Returns list of opportunities with game and team details
+    """
+    # Get elite teams in good form
+    elite_good_form = df_form[
+        (df_form['tier'] == 'Elite') &
+        (df_form['is_good_form'] == True)
+    ]['team'].tolist()
+
+    if not elite_good_form:
+        return []
+
+    opportunities = []
+
+    for _, game in today_games_df.iterrows():
+        home_team = game.get('home_team', '')
+        away_team = game.get('away_team', '')
+
+        # Check if either team is elite + good form
+        elite_teams_in_game = []
+        if home_team in elite_good_form:
+            elite_teams_in_game.append(('home', home_team))
+        if away_team in elite_good_form:
+            elite_teams_in_game.append(('away', away_team))
+
+        if not elite_teams_in_game:
+            continue
+
+        for position, elite_team in elite_teams_in_game:
+            opponent = away_team if position == 'home' else home_team
+
+            # Get standings info
+            team_standings = df_standings[df_standings['team'] == elite_team]
+            opp_standings = df_standings[df_standings['team'] == opponent]
+
+            # Get form info
+            team_form = df_form[df_form['team'] == elite_team]
+
+            opp_tier = opp_standings.iloc[0]['tier'] if len(opp_standings) > 0 else 'Unknown'
+            opp_win_pct = float(opp_standings.iloc[0]['win_pct'] * 100) if len(opp_standings) > 0 else None
+
+            opportunities.append({
+                'game_time_est': game.get('game_time_est'),
+                'home_team': home_team,
+                'away_team': away_team,
+                'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
+                'elite_team': elite_team,
+                'elite_team_position': position,
+                'opponent': opponent,
+                'opponent_tier': opp_tier,
+                'elite_team_win_pct': float(team_standings.iloc[0]['win_pct'] * 100) if len(team_standings) > 0 else None,
+                'elite_team_point_diff': float(team_standings.iloc[0]['point_diff_avg']) if len(team_standings) > 0 else None,
+                'elite_team_last_5_spread': float(team_form.iloc[0]['last_5_avg_spread']) if len(team_form) > 0 else None,
+                'opponent_win_pct': opp_win_pct
+            })
+
+    # Sort by elite team's recent form (best form first)
+    opportunities.sort(key=lambda x: x.get('elite_team_last_5_spread') or 0, reverse=True)
+
+    return opportunities
 
 
 def get_team_opponents(team_name: str, df_data: pd.DataFrame) -> List[str]:
@@ -762,7 +914,17 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     # Calculate handicap statistics
     df_team_stats_handicap = calculate_handicap_statistics(df_completed, handicap_points)
     logger.info(f"Calculated {handicap_points}-point handicap stats for {len(df_team_stats_handicap)} teams")
-    
+
+    # Calculate team standings and recent form for elite team strategy
+    df_standings = calculate_team_standings(df_completed)
+    elite_teams_count = len(df_standings[df_standings['tier'] == 'Elite'])
+    logger.info(f"Calculated standings for {len(df_standings)} teams ({elite_teams_count} elite)")
+
+    team_tier_map = df_standings.set_index('team')['tier'].to_dict()
+    df_form = calculate_recent_form(df_completed, team_tier_map)
+    elite_good_form_count = len(df_form[(df_form['tier'] == 'Elite') & (df_form['is_good_form'] == True)])
+    logger.info(f"Calculated recent form: {elite_good_form_count} elite teams in good form")
+
     # Fetch today's games
     today_games, today_date_str = fetch_todays_games(api_key, sport_key)
     
@@ -1027,7 +1189,13 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
         logger.info("Generating common opponent predictions for NCAAM...")
         common_opponent_predictions = generate_common_opponent_predictions(df_completed, df_today)
         logger.info(f"Generated {len(common_opponent_predictions)} common opponent predictions")
-    
+
+    # Generate elite team opportunities
+    elite_team_opportunities = generate_elite_team_opportunities(
+        df_standings, df_form, df_today
+    )
+    logger.info(f"Generated {len(elite_team_opportunities)} elite team opportunities")
+
     # Legacy opportunities list (for backward compatibility)
     opportunities_list = opportunities_to_json(opportunities, focus_team + '_focus')
     
@@ -1069,7 +1237,19 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
                 'games_without_common_opponents': len(df_today) - len(common_opponent_predictions) if len(df_today) > 0 else 0
             }
         }
-    
+
+    # Add elite_team strategy
+    strategies['elite_team'] = {
+        'opportunities': elite_team_opportunities,
+        'summary': {
+            'opportunities': len(elite_team_opportunities),
+            'elite_teams_total': elite_teams_count,
+            'elite_teams_good_form': elite_good_form_count,
+            'elite_percentile': ELITE_PERCENTILE,
+            'good_form_threshold': GOOD_FORM_THRESHOLD
+        }
+    }
+
     return {
         'sport': sport_key,
         'sport_name': config['name'],

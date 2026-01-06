@@ -87,6 +87,30 @@ const HomeScreen = ({ navigation }) => {
             <Text style={styles.arrow}>→</Text>
           </View>
         </TouchableOpacity>
+
+        {/* Elite Team Strategy */}
+        <TouchableOpacity
+          style={[styles.strategyCard, styles.eliteTeamCard]}
+          onPress={() => navigation.navigate('EliteTeams')}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.strategyIconContainer, styles.eliteIconContainer]}>
+            <Text style={styles.strategyIcon}>
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].icon}
+            </Text>
+          </View>
+          <View style={styles.strategyContent}>
+            <Text style={styles.strategyName}>
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].name}
+            </Text>
+            <Text style={styles.strategyDescription}>
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].description}
+            </Text>
+          </View>
+          <View style={styles.arrowContainer}>
+            <Text style={styles.arrow}>→</Text>
+          </View>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.footer}>
@@ -183,6 +207,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: '#999',
     textAlign: 'center',
+  },
+  eliteTeamCard: {
+    borderColor: '#FFD700',
+    borderWidth: 2,
+  },
+  eliteIconContainer: {
+    backgroundColor: '#FFF8E1',
   },
 });
 
