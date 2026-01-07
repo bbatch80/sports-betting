@@ -11,6 +11,9 @@ import { StatusBar } from 'expo-status-bar';
 import HomeScreen from './src/screens/HomeScreen';
 import StrategyResultsScreen from './src/screens/StrategyResultsScreen';
 import EliteTeamsScreen from './src/screens/EliteTeamsScreen';
+import HotVsColdScreen from './src/screens/HotVsColdScreen';
+import OpponentPerfectFormScreen from './src/screens/OpponentPerfectFormScreen';
+import StrategyPerformanceScreen from './src/screens/StrategyPerformanceScreen';
 
 const Stack = createStackNavigator();
 
@@ -40,6 +43,33 @@ export default function App() {
             options={{
               headerShown: true,
               headerTitle: 'Elite Teams',
+              headerBackTitle: 'Back',
+            }}
+          />
+          <Stack.Screen
+            name="HotVsCold"
+            component={HotVsColdScreen}
+            options={{
+              headerShown: true,
+              headerTitle: 'Hot vs Cold',
+              headerBackTitle: 'Back',
+            }}
+          />
+          <Stack.Screen
+            name="OpponentPerfectForm"
+            component={OpponentPerfectFormScreen}
+            options={{
+              headerShown: true,
+              headerTitle: 'Regression Bets',
+              headerBackTitle: 'Back',
+            }}
+          />
+          <Stack.Screen
+            name="StrategyPerformance"
+            component={StrategyPerformanceScreen}
+            options={{
+              headerShown: true,
+              headerTitle: 'Strategy Performance',
               headerBackTitle: 'Back',
             }}
           />

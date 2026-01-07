@@ -149,3 +149,127 @@ export const getEliteTeams = async (sport = null) => {
   }
 };
 
+/**
+ * Fetch Hot vs Cold opportunities from all sports
+ * Hot team (60%+ last 5) vs Cold team (40%- last 5)
+ * @param {string|null} sport - Optional sport filter
+ * @returns {Promise<Object>} Hot vs Cold opportunities data
+ */
+export const getHotVsColdOpportunities = async (sport = null) => {
+  try {
+    const predictionsBySport = await getAllPredictions();
+    const allOpportunities = [];
+    let totalOpportunities = 0;
+    let sportsWithOpportunities = 0;
+
+    // Extract hot_vs_cold opportunities from each sport
+    Object.keys(predictionsBySport).forEach(sportKey => {
+      if (sport && sportKey !== sport) return; // Filter by sport if specified
+
+      const prediction = predictionsBySport[sportKey];
+      const hotVsCold = prediction?.strategies?.hot_vs_cold;
+
+      if (hotVsCold?.opportunities?.length > 0) {
+        sportsWithOpportunities++;
+        hotVsCold.opportunities.forEach(opp => {
+          allOpportunities.push({
+            ...opp,
+            sport: sportKey,
+            sport_name: prediction.sport_name || sportKey.toUpperCase(),
+          });
+          totalOpportunities++;
+        });
+      }
+    });
+
+    return {
+      opportunities: allOpportunities,
+      summary: {
+        total_opportunities: totalOpportunities,
+        sports_with_opportunities: sportsWithOpportunities,
+      },
+    };
+  } catch (error) {
+    console.error('Error fetching hot vs cold opportunities:', error);
+    throw error;
+  }
+};
+
+/**
+ * Fetch Opponent Perfect Form opportunities from all sports
+ * Teams with 5/5 perfect form - bet on opponent (regression to mean)
+ * @param {string|null} sport - Optional sport filter
+ * @returns {Promise<Object>} Opponent Perfect Form opportunities data
+ */
+export const getOpponentPerfectFormOpportunities = async (sport = null) => {
+  try {
+    const predictionsBySport = await getAllPredictions();
+    const allOpportunities = [];
+    let totalOpportunities = 0;
+    let sportsWithOpportunities = 0;
+
+    // Extract opponent_perfect_form opportunities from each sport
+    Object.keys(predictionsBySport).forEach(sportKey => {
+      if (sport && sportKey !== sport) return; // Filter by sport if specified
+
+      const prediction = predictionsBySport[sportKey];
+      const perfectForm = prediction?.strategies?.opponent_perfect_form;
+
+      if (perfectForm?.opportunities?.length > 0) {
+        sportsWithOpportunities++;
+        perfectForm.opportunities.forEach(opp => {
+          allOpportunities.push({
+            ...opp,
+            sport: sportKey,
+            sport_name: prediction.sport_name || sportKey.toUpperCase(),
+          });
+          totalOpportunities++;
+        });
+      }
+    });
+
+    return {
+      opportunities: allOpportunities,
+      summary: {
+        total_opportunities: totalOpportunities,
+        sports_with_opportunities: sportsWithOpportunities,
+      },
+    };
+  } catch (error) {
+    console.error('Error fetching opponent perfect form opportunities:', error);
+    throw error;
+  }
+};
+
+/**
+ * Fetch strategy performance data for a sport
+ * Returns cumulative win rates and chart data for all strategies
+ * @param {string} sport - Sport key (nfl, nba, ncaam)
+ * @returns {Promise<Object>} Strategy performance data with chart data
+ */
+export const getStrategyPerformance = async (sport) => {
+  try {
+    // Check if API URL is configured
+    if (API_BASE_URL.includes('YOUR-API-ID')) {
+      throw new Error('API Gateway URL not configured. Please update src/constants/api.js with your API Gateway URL.');
+    }
+
+    const url = `/api/strategy-performance/${sport}`;
+    const response = await apiClient.get(url);
+    return response.data;
+  } catch (error) {
+    console.error(`Error fetching strategy performance for ${sport}:`, error);
+
+    // Provide helpful error messages
+    if (error.message && error.message.includes('API Gateway URL')) {
+      throw error;
+    } else if (error.response) {
+      throw new Error(`API Error: ${error.response.status} - ${error.response.statusText}`);
+    } else if (error.request) {
+      throw new Error('Network error: Could not reach API. Check your API Gateway URL and internet connection.');
+    } else {
+      throw new Error(error.message || 'Failed to fetch strategy performance');
+    }
+  }
+};
+

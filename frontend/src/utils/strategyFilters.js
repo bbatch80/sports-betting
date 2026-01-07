@@ -82,12 +82,54 @@ export const filterSpreadCoverageStrategy = (games) => {
 };
 
 /**
+ * Filter/retrieve Hot vs Cold Strategy opportunities
+ * Uses pre-computed opportunities from backend where hot team (60%+ coverage in last 5)
+ * plays cold team (40%- coverage in last 5)
+ * @param {Object} strategiesData - Strategies data from API response
+ * @returns {Array} Hot vs Cold opportunities
+ */
+export const filterHotVsColdStrategy = (strategiesData) => {
+  if (!strategiesData?.hot_vs_cold?.opportunities) {
+    return [];
+  }
+  return strategiesData.hot_vs_cold.opportunities;
+};
+
+/**
+ * Filter/retrieve Opponent Perfect Form Strategy opportunities
+ * Uses pre-computed opportunities from backend where one team has 5/5 perfect form
+ * and we bet on their opponent (regression to mean)
+ * @param {Object} strategiesData - Strategies data from API response
+ * @returns {Array} Opponent Perfect Form opportunities
+ */
+export const filterOpponentPerfectFormStrategy = (strategiesData) => {
+  if (!strategiesData?.opponent_perfect_form?.opportunities) {
+    return [];
+  }
+  return strategiesData.opponent_perfect_form.opportunities;
+};
+
+/**
+ * Filter/retrieve Elite Team Strategy opportunities
+ * Uses pre-computed opportunities from backend
+ * @param {Object} strategiesData - Strategies data from API response
+ * @returns {Array} Elite Team opportunities
+ */
+export const filterEliteTeamStrategy = (strategiesData) => {
+  if (!strategiesData?.elite_team?.opportunities) {
+    return [];
+  }
+  return strategiesData.elite_team.opportunities;
+};
+
+/**
  * Filter games based on strategy type
  * @param {Array} games - Array of game objects
  * @param {string} strategy - Strategy type (from STRATEGIES constant)
- * @returns {Array} Filtered games
+ * @param {Object} strategiesData - Strategies data from API (for backend-computed strategies)
+ * @returns {Array} Filtered games or opportunities
  */
-export const filterGamesByStrategy = (games, strategy) => {
+export const filterGamesByStrategy = (games, strategy, strategiesData = null) => {
   switch (strategy) {
     case STRATEGIES.HOME_TEAM:
       return filterHomeTeamStrategy(games);
@@ -95,6 +137,12 @@ export const filterGamesByStrategy = (games, strategy) => {
       return filterAwayTeamStrategy(games);
     case STRATEGIES.SPREAD_COVERAGE:
       return filterSpreadCoverageStrategy(games);
+    case STRATEGIES.ELITE_TEAM:
+      return filterEliteTeamStrategy(strategiesData);
+    case STRATEGIES.HOT_VS_COLD:
+      return filterHotVsColdStrategy(strategiesData);
+    case STRATEGIES.OPPONENT_PERFECT_FORM:
+      return filterOpponentPerfectFormStrategy(strategiesData);
     default:
       console.warn(`Unknown strategy: ${strategy}`);
       return [];

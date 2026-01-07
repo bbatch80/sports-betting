@@ -35,6 +35,14 @@ LAMBDA_FUNCTIONS = {
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
         'schedule': 'cron(30 11 * * ? *)'  # 6:30 AM EST (11:30 UTC)
+    },
+    'evaluate-strategy-results': {
+        'description': 'Evaluates yesterday\'s strategy predictions against actual results',
+        'timeout': 300,  # 5 minutes
+        'memory': 512,   # MB
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': 'cron(0 8 * * ? *)'  # 3:00 AM EST (8:00 UTC) - after all games complete
     }
 }
 

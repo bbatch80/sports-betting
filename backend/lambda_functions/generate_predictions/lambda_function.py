@@ -56,6 +56,12 @@ API_RATE_LIMIT_DELAY = 1.0
 ELITE_PERCENTILE = 0.75  # Top 25% by win percentage
 GOOD_FORM_THRESHOLD = 3  # Last 5 games avg spread performance > 3
 
+# Form-based strategy configuration (Hot vs Cold, Perfect Form)
+HOT_FORM_THRESHOLD = 0.60   # 60% coverage = hot (3+ of last 5)
+COLD_FORM_THRESHOLD = 0.40  # 40% coverage = cold (2 or less of last 5)
+FORM_GAMES_LOOKBACK = 5     # Last 5 games for form calculation
+FORM_HANDICAP_POINTS = 11   # 11-point handicap for form-based strategies
+
 
 def get_api_key() -> str:
     """Get Odds API key from AWS Secrets Manager"""
@@ -464,6 +470,251 @@ def generate_elite_team_opportunities(
 
     # Sort by elite team's recent form (best form first)
     opportunities.sort(key=lambda x: x.get('elite_team_last_5_spread') or 0, reverse=True)
+
+    return opportunities
+
+
+def calculate_team_form_for_game(
+    df_completed: pd.DataFrame,
+    team: str,
+    as_of_date: datetime
+) -> Dict[str, Any]:
+    """
+    Calculate a team's form (last 5 games spread coverage) as of a specific date.
+
+    This prevents look-ahead bias by only using games before the given date.
+
+    Args:
+        df_completed: Historical completed games DataFrame
+        team: Team name to calculate form for
+        as_of_date: Calculate form only using games before this date
+
+    Returns:
+        Dictionary with form stats:
+        - last_5_games: list of coverage results (True/False)
+        - last_5_coverage_pct: percentage of games covered in last 5 (0.0 to 1.0)
+        - last_5_results: string like "4/5"
+        - games_count: number of games used (may be < 5)
+        - is_hot: True if coverage >= 60%
+        - is_cold: True if coverage <= 40%
+        - is_perfect: True if coverage == 100% (5/5)
+    """
+    # Filter to games before the as_of_date
+    df_before = df_completed[df_completed['game_date'] < as_of_date].copy()
+    df_before = df_before.sort_values('game_date')
+
+    # Get team's games (both home and away)
+    team_games = []
+
+    for _, row in df_before.iterrows():
+        if row['home_team'] == team:
+            # Home team: spread_result_difference > 0 means covered
+            covered = row['spread_result_difference'] > 0
+            team_games.append({
+                'date': row['game_date'],
+                'covered': covered
+            })
+        elif row['away_team'] == team:
+            # Away team: spread_result_difference < 0 means covered
+            covered = row['spread_result_difference'] < 0
+            team_games.append({
+                'date': row['game_date'],
+                'covered': covered
+            })
+
+    # Sort by date and get last 5
+    team_games = sorted(team_games, key=lambda x: x['date'])
+    last_n = team_games[-FORM_GAMES_LOOKBACK:] if len(team_games) >= FORM_GAMES_LOOKBACK else team_games
+
+    games_count = len(last_n)
+    if games_count == 0:
+        return {
+            'last_5_games': [],
+            'last_5_coverage_pct': None,
+            'last_5_results': '0/0',
+            'games_count': 0,
+            'is_hot': False,
+            'is_cold': False,
+            'is_perfect': False
+        }
+
+    covers = sum(1 for g in last_n if g['covered'])
+    coverage_pct = covers / games_count
+
+    return {
+        'last_5_games': [g['covered'] for g in last_n],
+        'last_5_coverage_pct': coverage_pct,
+        'last_5_results': f"{covers}/{games_count}",
+        'games_count': games_count,
+        'is_hot': coverage_pct >= HOT_FORM_THRESHOLD,
+        'is_cold': coverage_pct <= COLD_FORM_THRESHOLD,
+        'is_perfect': coverage_pct == 1.0 and games_count >= FORM_GAMES_LOOKBACK
+    }
+
+
+def generate_hot_vs_cold_opportunities(
+    df_completed: pd.DataFrame,
+    today_games_df: pd.DataFrame
+) -> List[Dict[str, Any]]:
+    """
+    Generate hot vs cold opportunities.
+
+    Strategy: When a "hot" team (60%+ coverage in last 5) plays a "cold" team
+    (40%- coverage in last 5), bet on the hot team to cover an 11-point handicap.
+
+    Args:
+        df_completed: Historical completed games
+        today_games_df: Today's games DataFrame
+
+    Returns:
+        List of opportunities with hot/cold team info
+    """
+    opportunities = []
+
+    # Use today's date for form calculation
+    est = timezone(timedelta(hours=-5))
+    today_date = datetime.now(est)
+
+    for _, game in today_games_df.iterrows():
+        home_team = game.get('home_team', '')
+        away_team = game.get('away_team', '')
+
+        if not home_team or not away_team:
+            continue
+
+        # Calculate form for both teams
+        home_form = calculate_team_form_for_game(df_completed, home_team, today_date)
+        away_form = calculate_team_form_for_game(df_completed, away_team, today_date)
+
+        # Skip if either team doesn't have enough games
+        if home_form['games_count'] < FORM_GAMES_LOOKBACK or away_form['games_count'] < FORM_GAMES_LOOKBACK:
+            continue
+
+        # Check for hot vs cold matchup
+        hot_team = None
+        cold_team = None
+        hot_form = None
+        cold_form = None
+
+        if home_form['is_hot'] and away_form['is_cold']:
+            hot_team = home_team
+            cold_team = away_team
+            hot_form = home_form
+            cold_form = away_form
+            hot_position = 'home'
+            cold_position = 'away'
+        elif away_form['is_hot'] and home_form['is_cold']:
+            hot_team = away_team
+            cold_team = home_team
+            hot_form = away_form
+            cold_form = home_form
+            hot_position = 'away'
+            cold_position = 'home'
+
+        # Only create opportunity if we have a clear hot vs cold matchup
+        if hot_team and cold_team:
+            form_differential = (hot_form['last_5_coverage_pct'] - cold_form['last_5_coverage_pct']) * 100
+
+            opportunities.append({
+                'game_time_est': game.get('game_time_est'),
+                'home_team': home_team,
+                'away_team': away_team,
+                'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
+                'hot_team': hot_team,
+                'hot_team_position': hot_position,
+                'hot_team_last_5_coverage_pct': round(hot_form['last_5_coverage_pct'] * 100, 1),
+                'hot_team_last_5_results': hot_form['last_5_results'],
+                'cold_team': cold_team,
+                'cold_team_position': cold_position,
+                'cold_team_last_5_coverage_pct': round(cold_form['last_5_coverage_pct'] * 100, 1),
+                'cold_team_last_5_results': cold_form['last_5_results'],
+                'form_differential': round(form_differential, 1),
+                'bet_on': hot_team,
+                'handicap_points': FORM_HANDICAP_POINTS
+            })
+
+    # Sort by form differential (largest advantage first)
+    opportunities.sort(key=lambda x: x.get('form_differential', 0), reverse=True)
+
+    return opportunities
+
+
+def generate_opponent_perfect_form_opportunities(
+    df_completed: pd.DataFrame,
+    today_games_df: pd.DataFrame
+) -> List[Dict[str, Any]]:
+    """
+    Generate opponent perfect form (regression) opportunities.
+
+    Strategy: When a team has covered their spread in ALL of their last 5 games
+    (100% = 5/5), their NEXT opponent is likely to cover the 11-point handicap
+    due to regression to mean.
+
+    Args:
+        df_completed: Historical completed games
+        today_games_df: Today's games DataFrame
+
+    Returns:
+        List of opportunities
+    """
+    opportunities = []
+
+    # Use today's date for form calculation
+    est = timezone(timedelta(hours=-5))
+    today_date = datetime.now(est)
+
+    for _, game in today_games_df.iterrows():
+        home_team = game.get('home_team', '')
+        away_team = game.get('away_team', '')
+
+        if not home_team or not away_team:
+            continue
+
+        # Calculate form for both teams
+        home_form = calculate_team_form_for_game(df_completed, home_team, today_date)
+        away_form = calculate_team_form_for_game(df_completed, away_team, today_date)
+
+        # Check if home team has perfect form
+        if home_form['is_perfect']:
+            # Bet on away team (opponent of perfect form team)
+            opportunities.append({
+                'game_time_est': game.get('game_time_est'),
+                'home_team': home_team,
+                'away_team': away_team,
+                'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
+                'perfect_form_team': home_team,
+                'perfect_form_team_position': 'home',
+                'perfect_form_team_coverage_pct': 100.0,
+                'perfect_form_team_results': home_form['last_5_results'],
+                'opponent': away_team,
+                'opponent_position': 'away',
+                'opponent_coverage_pct': round(away_form['last_5_coverage_pct'] * 100, 1) if away_form['last_5_coverage_pct'] else None,
+                'opponent_results': away_form['last_5_results'],
+                'bet_on': away_team,
+                'handicap_points': FORM_HANDICAP_POINTS,
+                'rationale': 'Regression to mean - betting against perfect 5/5 streak'
+            })
+
+        # Check if away team has perfect form
+        if away_form['is_perfect']:
+            # Bet on home team (opponent of perfect form team)
+            opportunities.append({
+                'game_time_est': game.get('game_time_est'),
+                'home_team': home_team,
+                'away_team': away_team,
+                'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
+                'perfect_form_team': away_team,
+                'perfect_form_team_position': 'away',
+                'perfect_form_team_coverage_pct': 100.0,
+                'perfect_form_team_results': away_form['last_5_results'],
+                'opponent': home_team,
+                'opponent_position': 'home',
+                'opponent_coverage_pct': round(home_form['last_5_coverage_pct'] * 100, 1) if home_form['last_5_coverage_pct'] else None,
+                'opponent_results': home_form['last_5_results'],
+                'bet_on': home_team,
+                'handicap_points': FORM_HANDICAP_POINTS,
+                'rationale': 'Regression to mean - betting against perfect 5/5 streak'
+            })
 
     return opportunities
 
@@ -1196,6 +1447,18 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     )
     logger.info(f"Generated {len(elite_team_opportunities)} elite team opportunities")
 
+    # Generate hot vs cold opportunities
+    hot_vs_cold_opportunities = generate_hot_vs_cold_opportunities(
+        df_completed, df_today
+    )
+    logger.info(f"Generated {len(hot_vs_cold_opportunities)} hot vs cold opportunities")
+
+    # Generate opponent perfect form (regression) opportunities
+    opponent_perfect_form_opportunities = generate_opponent_perfect_form_opportunities(
+        df_completed, df_today
+    )
+    logger.info(f"Generated {len(opponent_perfect_form_opportunities)} opponent perfect form opportunities")
+
     # Legacy opportunities list (for backward compatibility)
     opportunities_list = opportunities_to_json(opportunities, focus_team + '_focus')
     
@@ -1247,6 +1510,29 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
             'elite_teams_good_form': elite_good_form_count,
             'elite_percentile': ELITE_PERCENTILE,
             'good_form_threshold': GOOD_FORM_THRESHOLD
+        }
+    }
+
+    # Add hot_vs_cold strategy (form-based)
+    strategies['hot_vs_cold'] = {
+        'opportunities': hot_vs_cold_opportunities,
+        'summary': {
+            'opportunities': len(hot_vs_cold_opportunities),
+            'hot_threshold': HOT_FORM_THRESHOLD,
+            'cold_threshold': COLD_FORM_THRESHOLD,
+            'form_lookback_games': FORM_GAMES_LOOKBACK,
+            'handicap_points': FORM_HANDICAP_POINTS
+        }
+    }
+
+    # Add opponent_perfect_form strategy (regression-based)
+    strategies['opponent_perfect_form'] = {
+        'opportunities': opponent_perfect_form_opportunities,
+        'summary': {
+            'opportunities': len(opponent_perfect_form_opportunities),
+            'perfect_form_games': FORM_GAMES_LOOKBACK,
+            'handicap_points': FORM_HANDICAP_POINTS,
+            'rationale': 'Regression to mean - betting against perfect streaks'
         }
     }
 

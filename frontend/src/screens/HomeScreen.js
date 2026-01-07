@@ -111,6 +111,74 @@ const HomeScreen = ({ navigation }) => {
             <Text style={styles.arrow}>→</Text>
           </View>
         </TouchableOpacity>
+
+        {/* Hot vs Cold Strategy */}
+        <TouchableOpacity
+          style={[styles.strategyCard, styles.hotVsColdCard]}
+          onPress={() => navigation.navigate('HotVsCold')}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.strategyIconContainer, styles.hotVsColdIconContainer]}>
+            <Text style={styles.strategyIcon}>
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].icon}
+            </Text>
+          </View>
+          <View style={styles.strategyContent}>
+            <Text style={styles.strategyName}>
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].name}
+            </Text>
+            <Text style={styles.strategyDescription}>
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].description}
+            </Text>
+          </View>
+          <View style={styles.arrowContainer}>
+            <Text style={styles.arrow}>→</Text>
+          </View>
+        </TouchableOpacity>
+
+        {/* Opponent Perfect Form (Regression) Strategy */}
+        <TouchableOpacity
+          style={[styles.strategyCard, styles.regressionCard]}
+          onPress={() => navigation.navigate('OpponentPerfectForm')}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.strategyIconContainer, styles.regressionIconContainer]}>
+            <Text style={styles.strategyIcon}>
+              {STRATEGY_INFO[STRATEGIES.OPPONENT_PERFECT_FORM].icon}
+            </Text>
+          </View>
+          <View style={styles.strategyContent}>
+            <Text style={styles.strategyName}>
+              {STRATEGY_INFO[STRATEGIES.OPPONENT_PERFECT_FORM].name}
+            </Text>
+            <Text style={styles.strategyDescription}>
+              {STRATEGY_INFO[STRATEGIES.OPPONENT_PERFECT_FORM].description}
+            </Text>
+          </View>
+          <View style={styles.arrowContainer}>
+            <Text style={styles.arrow}>→</Text>
+          </View>
+        </TouchableOpacity>
+
+        {/* Strategy Performance Analytics */}
+        <TouchableOpacity
+          style={[styles.strategyCard, styles.performanceCard]}
+          onPress={() => navigation.navigate('StrategyPerformance')}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.strategyIconContainer, styles.performanceIconContainer]}>
+            <Text style={styles.strategyIcon}>📊</Text>
+          </View>
+          <View style={styles.strategyContent}>
+            <Text style={styles.strategyName}>Strategy Performance</Text>
+            <Text style={styles.strategyDescription}>
+              Track cumulative win rates and ROI for all strategies over the season
+            </Text>
+          </View>
+          <View style={styles.arrowContainer}>
+            <Text style={styles.arrow}>→</Text>
+          </View>
+        </TouchableOpacity>
       </View>
 
       <View style={styles.footer}>
@@ -214,6 +282,27 @@ const styles = StyleSheet.create({
   },
   eliteIconContainer: {
     backgroundColor: '#FFF8E1',
+  },
+  hotVsColdCard: {
+    borderColor: '#FF5722',
+    borderWidth: 2,
+  },
+  hotVsColdIconContainer: {
+    backgroundColor: '#FFF3E0',
+  },
+  regressionCard: {
+    borderColor: '#7B1FA2',
+    borderWidth: 2,
+  },
+  regressionIconContainer: {
+    backgroundColor: '#F3E5F5',
+  },
+  performanceCard: {
+    borderColor: '#1976D2',
+    borderWidth: 2,
+  },
+  performanceIconContainer: {
+    backgroundColor: '#E3F2FD',
   },
 });
 

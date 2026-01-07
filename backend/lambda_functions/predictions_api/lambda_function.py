@@ -20,6 +20,82 @@ BUCKET_NAME = 'sports-betting-analytics-data'
 ALLOWED_SPORTS = ['nfl', 'nba', 'ncaam']
 
 
+def get_strategy_performance_from_s3(sport_key: str) -> Dict[str, Any]:
+    """
+    Get strategy performance data from S3
+
+    Args:
+        sport_key: Sport key (nfl, nba, ncaam)
+
+    Returns:
+        Strategy performance data with cumulative win rates
+    """
+    s3_key = f"strategy_tracking/performance/{sport_key}_strategy_performance.json"
+
+    try:
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+        performance_data = json.loads(response['Body'].read().decode('utf-8'))
+        logger.info(f"Successfully retrieved strategy performance for {sport_key}")
+
+        # Transform for API response
+        strategies_response = {}
+        for strategy_name, strat in performance_data.get('strategies', {}).items():
+            # Calculate ROI (assuming -110 odds: win = +0.909, loss = -1)
+            wins = strat.get('total_wins', 0)
+            losses = strat.get('total_losses', 0)
+            total_bets = wins + losses
+
+            if total_bets > 0:
+                units_won = (wins * 0.909) - losses
+                roi = (units_won / total_bets) * 100
+            else:
+                units_won = 0
+                roi = 0
+
+            # Build chart data from daily_cumulative
+            chart_data = []
+            for daily in strat.get('daily_cumulative', []):
+                chart_data.append({
+                    'date': daily.get('date'),
+                    'rate': daily.get('cumulative_rate', 0)
+                })
+
+            strategies_response[strategy_name] = {
+                'name': strategy_name.replace('_', ' ').title(),
+                'total_predictions': strat.get('total_predictions', 0),
+                'wins': wins,
+                'losses': losses,
+                'pushes': strat.get('total_pushes', 0),
+                'win_rate': strat.get('current_win_rate', 0),
+                'roi': round(roi, 2),
+                'units_won': round(units_won, 2),
+                'current_streak': strat.get('current_streak', 0),
+                'streak_type': strat.get('streak_type'),
+                'chart_data': chart_data
+            }
+
+        return {
+            'sport': sport_key,
+            'sport_name': sport_key.upper(),
+            'strategies': strategies_response,
+            'last_updated': performance_data.get('last_updated'),
+            'season_start': performance_data.get('season_start')
+        }
+
+    except s3_client.exceptions.NoSuchKey:
+        logger.warning(f"No strategy performance found for {sport_key}")
+        return {
+            'sport': sport_key,
+            'sport_name': sport_key.upper(),
+            'strategies': {},
+            'error': 'No performance data available',
+            'message': f'Strategy performance for {sport_key.upper()} has not been tracked yet'
+        }
+    except Exception as e:
+        logger.error(f"Error reading strategy performance from S3: {e}")
+        raise
+
+
 def get_elite_teams_from_s3(sport_key: str = None) -> Dict[str, Any]:
     """
     Get elite team opportunities from predictions
@@ -177,6 +253,27 @@ def lambda_handler(event, context):
         path = event.get('path', '')
         path_parts = [p for p in path.split('/') if p]
         
+        # Check for strategy-performance endpoint: /api/strategy-performance/{sport}
+        if 'strategy-performance' in path_parts:
+            perf_idx = path_parts.index('strategy-performance')
+            # Sport is required for this endpoint
+            if len(path_parts) > perf_idx + 1:
+                sport = path_parts[perf_idx + 1].lower()
+                if sport not in ALLOWED_SPORTS:
+                    return create_response(400, {
+                        'error': 'Invalid sport',
+                        'message': f'Valid sports are: {", ".join(ALLOWED_SPORTS)}',
+                        'received': sport
+                    })
+                performance = get_strategy_performance_from_s3(sport)
+                return create_response(200, performance)
+            else:
+                return create_response(400, {
+                    'error': 'Sport required',
+                    'message': f'Please specify a sport: /api/strategy-performance/{{sport}}',
+                    'valid_sports': ALLOWED_SPORTS
+                })
+
         # Check for elite-teams endpoint: /api/elite-teams or /api/elite-teams/{sport}
         if 'elite-teams' in path_parts:
             elite_idx = path_parts.index('elite-teams')

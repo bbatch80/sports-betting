@@ -2,6 +2,75 @@
 
 Monorepo containing the backend (Python/AWS) and frontend (React Native/Expo) for sports betting predictions.
 
+---
+
+## CRITICAL: Strategy Performance Tracking
+
+**This is a core requirement of the project.** Every betting strategy must have its performance tracked over time from season start to current date.
+
+### Requirements
+
+1. **Track Every Prediction**: When a strategy identifies an opportunity, record:
+   - Date, sport, strategy name
+   - Teams involved, spread, handicap applied
+   - The bet recommendation (which team to bet on)
+   - Confidence/strength metrics
+
+2. **Match Predictions to Outcomes**: After games complete, determine:
+   - Did the recommended bet win or lose?
+   - By how many points?
+   - Store win/loss result linked to the original prediction
+
+3. **Cumulative Performance Visualization**: Display line graphs showing:
+   - X-axis: Days of the season (game dates)
+   - Y-axis: Cumulative win rate OR cumulative units won
+   - One line per strategy for comparison
+   - Similar to "Cumulative Percentage Over Time" graphs in analysis notebooks
+
+4. **Key Metrics Per Strategy**:
+   - Total predictions made
+   - Wins / Losses / Win Rate
+   - ROI (units won/lost assuming -110 odds)
+   - Performance by confidence level
+   - Streak tracking (current win/loss streak)
+
+### Current Strategies to Track
+
+| Strategy | Handicap | Logic |
+|----------|----------|-------|
+| `home_focus` | Variable | Home team has higher handicap coverage % |
+| `away_focus` | Variable | Away team has higher handicap coverage % |
+| `coverage_based` | 0 | One team has ≥10% better spread coverage |
+| `elite_team` | 0 | Top 25% team by win% in good recent form |
+| `hot_vs_cold` | 11 pts | Hot team (60%+ last 5) vs cold team (40%-) |
+| `opponent_perfect_form` | 11 pts | Bet against teams with perfect 5/5 form |
+| `common_opponent` | 0 | NCAAM only - based on shared opponents |
+
+### Data Storage (S3)
+
+```
+s3://sports-betting-analytics-data/
+├── predictions/                    # Daily predictions (existing)
+│   └── predictions_{sport}_{date}.json
+├── strategy_tracking/              # NEW: Strategy results
+│   ├── results_{sport}_{date}.json # Daily matched results
+│   └── performance/                # Aggregated stats
+│       └── {sport}_strategy_performance.json
+```
+
+### Implementation Status
+
+- [ ] Lambda function to match predictions to outcomes (runs after games complete)
+- [ ] S3 storage for strategy results
+- [ ] Aggregation logic for cumulative performance
+- [ ] API endpoint for strategy performance data
+- [ ] Frontend: Strategy Performance screen with line graphs
+- [ ] Frontend: Individual strategy detail views
+
+**When implementing ANY new strategy, always include the tracking infrastructure.**
+
+---
+
 ## Claude Behavior Guidelines
 
 ### Research Before Action
