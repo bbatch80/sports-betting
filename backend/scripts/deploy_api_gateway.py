@@ -462,6 +462,14 @@ def create_api_gateway(apigw_client, api_name, predictions_lambda_arn, predictio
             predictions_lambda_arn, predictions_function_name, api_name
         )
 
+        # Set up strategy-performance endpoint (uses predictions Lambda)
+        print(f"\n  Setting up strategy-performance endpoints...")
+        setup_api_resource(
+            apigw_client, api_id, api_resource_id,
+            '/api/strategy-performance/{sport}', 'strategy-performance',
+            predictions_lambda_arn, predictions_function_name, api_name
+        )
+
         # Set up results endpoints
         print(f"\n  Setting up results endpoints...")
         setup_api_resource(
