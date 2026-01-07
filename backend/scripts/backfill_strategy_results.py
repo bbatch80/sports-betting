@@ -523,9 +523,10 @@ def backfill_sport(sport: str, start_date: str, end_date: Optional[str] = None):
     if end_date:
         end = datetime.strptime(end_date, '%Y-%m-%d')
     else:
-        # Default to yesterday
+        # Default to yesterday (use naive datetime for comparison)
         est = timezone(timedelta(hours=-5))
-        end = datetime.now(est) - timedelta(days=1)
+        end_aware = datetime.now(est) - timedelta(days=1)
+        end = datetime(end_aware.year, end_aware.month, end_aware.day)
 
     # Process each date
     daily_results = []
