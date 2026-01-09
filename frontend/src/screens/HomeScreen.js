@@ -91,20 +91,20 @@ const HomeScreen = ({ navigation }) => {
         {/* Elite Team Strategy */}
         <TouchableOpacity
           style={[styles.strategyCard, styles.eliteTeamCard]}
-          onPress={() => navigation.navigate('EliteTeams')}
+          onPress={() => handleStrategySelect(STRATEGIES.ELITE_TEAM_WINPCT)}
           activeOpacity={0.7}
         >
           <View style={[styles.strategyIconContainer, styles.eliteIconContainer]}>
             <Text style={styles.strategyIcon}>
-              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].icon}
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM_WINPCT].icon}
             </Text>
           </View>
           <View style={styles.strategyContent}>
             <Text style={styles.strategyName}>
-              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].name}
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM_WINPCT].name}
             </Text>
             <Text style={styles.strategyDescription}>
-              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM].description}
+              {STRATEGY_INFO[STRATEGIES.ELITE_TEAM_WINPCT].description}
             </Text>
           </View>
           <View style={styles.arrowContainer}>
@@ -115,20 +115,20 @@ const HomeScreen = ({ navigation }) => {
         {/* Hot vs Cold Strategy */}
         <TouchableOpacity
           style={[styles.strategyCard, styles.hotVsColdCard]}
-          onPress={() => navigation.navigate('HotVsCold')}
+          onPress={() => handleStrategySelect(STRATEGIES.HOT_VS_COLD_5)}
           activeOpacity={0.7}
         >
           <View style={[styles.strategyIconContainer, styles.hotVsColdIconContainer]}>
             <Text style={styles.strategyIcon}>
-              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].icon}
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD_5].icon}
             </Text>
           </View>
           <View style={styles.strategyContent}>
             <Text style={styles.strategyName}>
-              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].name}
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD_5].name}
             </Text>
             <Text style={styles.strategyDescription}>
-              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD].description}
+              {STRATEGY_INFO[STRATEGIES.HOT_VS_COLD_5].description}
             </Text>
           </View>
           <View style={styles.arrowContainer}>
@@ -139,7 +139,7 @@ const HomeScreen = ({ navigation }) => {
         {/* Opponent Perfect Form (Regression) Strategy */}
         <TouchableOpacity
           style={[styles.strategyCard, styles.regressionCard]}
-          onPress={() => navigation.navigate('OpponentPerfectForm')}
+          onPress={() => handleStrategySelect(STRATEGIES.OPPONENT_PERFECT_FORM)}
           activeOpacity={0.7}
         >
           <View style={[styles.strategyIconContainer, styles.regressionIconContainer]}>

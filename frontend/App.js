@@ -10,9 +10,6 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
 import HomeScreen from './src/screens/HomeScreen';
 import StrategyResultsScreen from './src/screens/StrategyResultsScreen';
-import EliteTeamsScreen from './src/screens/EliteTeamsScreen';
-import HotVsColdScreen from './src/screens/HotVsColdScreen';
-import OpponentPerfectFormScreen from './src/screens/OpponentPerfectFormScreen';
 import StrategyPerformanceScreen from './src/screens/StrategyPerformanceScreen';
 
 const Stack = createStackNavigator();
@@ -35,33 +32,6 @@ export default function App() {
             component={StrategyResultsScreen}
             options={{
               headerShown: false,
-            }}
-          />
-          <Stack.Screen
-            name="EliteTeams"
-            component={EliteTeamsScreen}
-            options={{
-              headerShown: true,
-              headerTitle: 'Elite Teams',
-              headerBackTitle: 'Back',
-            }}
-          />
-          <Stack.Screen
-            name="HotVsCold"
-            component={HotVsColdScreen}
-            options={{
-              headerShown: true,
-              headerTitle: 'Hot vs Cold',
-              headerBackTitle: 'Back',
-            }}
-          />
-          <Stack.Screen
-            name="OpponentPerfectForm"
-            component={OpponentPerfectFormScreen}
-            options={{
-              headerShown: true,
-              headerTitle: 'Regression Bets',
-              headerBackTitle: 'Back',
             }}
           />
           <Stack.Screen

@@ -612,11 +612,17 @@ def page_opportunities():
     with st.expander("⚙️ Detection Settings", expanded=False):
         col1, col2, col3 = st.columns(3)
         with col1:
-            min_sample = st.slider("Min Sample Size", 10, 100, 30, help="Minimum observations required for pattern")
+            min_sample = st.slider(
+                "Min Sample Size",
+                5, 100, 30,
+                help="Minimum streak situations required. Must have at least 5 occurrences to be considered actionable."
+            )
         with col2:
             min_edge = st.slider("Min Edge %", 1, 15, 5, help="Minimum edge vs baseline to include")
         with col3:
             min_confidence = st.selectbox("Min Confidence", ["low", "medium", "high"], index=0)
+
+        st.caption("⚠️ Patterns with fewer than 30 samples should be treated with caution. Sample size is shown for each opportunity.")
 
     # Detect patterns (cached)
     @st.cache_data(ttl=3600, show_spinner=False)

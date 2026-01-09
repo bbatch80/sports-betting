@@ -54,19 +54,27 @@ def get_confidence(sample_size: int, edge: float) -> str:
     Determine confidence level based on sample size and edge magnitude.
 
     Args:
-        sample_size: Number of observations
+        sample_size: Number of observations (streak situations)
         edge: Edge vs baseline (can be positive or negative)
 
     Returns:
         'high', 'medium', or 'low'
+
+    Thresholds:
+        - High: 50+ samples AND 8%+ edge
+        - Medium: 30+ samples AND 5%+ edge
+        - Low: Everything else (use with caution)
+
+    Note: Patterns with <30 samples should be treated cautiously.
+    The minimum of 5 samples is a hard floor for any pattern to be considered.
     """
     abs_edge = abs(edge)
 
     # High confidence: Large sample AND significant edge
     if sample_size >= 50 and abs_edge >= 0.08:
         return 'high'
-    # Medium confidence: Decent sample OR strong edge
-    elif sample_size >= 35 or abs_edge >= 0.10:
+    # Medium confidence: Decent sample AND meaningful edge
+    elif sample_size >= 30 and abs_edge >= 0.05:
         return 'medium'
     else:
         return 'low'

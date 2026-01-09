@@ -29,16 +29,32 @@ SPORTS = ['nfl', 'nba', 'ncaam']
 
 # Strategy configurations with their handicap points
 STRATEGY_CONFIG = {
-    'home_focus': {'handicap': 'variable', 'bet_on_field': None},
-    'away_focus': {'handicap': 'variable', 'bet_on_field': None},
+    # Home/Away Focus strategies - fixed 11pt handicap across all leagues
+    'home_focus': {'handicap': 11, 'bet_on_field': None},
+    'away_focus': {'handicap': 11, 'bet_on_field': None},
+
+    # Coverage-based strategy - 0pt handicap
     'coverage_based': {'handicap': 0, 'bet_on_field': 'better_team'},
-    'elite_team': {'handicap': 0, 'bet_on_field': 'elite_team'},
-    'hot_vs_cold': {'handicap': 11, 'bet_on_field': 'bet_on'},
+
+    # Elite Team variants - 11pt handicap
+    'elite_team_winpct': {'handicap': 11, 'bet_on_field': 'elite_team'},
+    'elite_team_coverage': {'handicap': 11, 'bet_on_field': 'elite_team'},
+    'elite_team': {'handicap': 11, 'bet_on_field': 'elite_team'},  # Legacy alias
+
+    # Hot vs Cold variants - 11pt handicap
+    'hot_vs_cold_3': {'handicap': 11, 'bet_on_field': 'bet_on'},
+    'hot_vs_cold_5': {'handicap': 11, 'bet_on_field': 'bet_on'},
+    'hot_vs_cold_7': {'handicap': 11, 'bet_on_field': 'bet_on'},
+    'hot_vs_cold': {'handicap': 11, 'bet_on_field': 'bet_on'},  # Legacy alias
+
+    # Opponent Perfect Form (regression) - 11pt handicap
     'opponent_perfect_form': {'handicap': 11, 'bet_on_field': 'bet_on'},
-    'common_opponent': {'handicap': 0, 'bet_on_field': None}  # NCAAM only
+
+    # Common Opponent (NCAAM only) - 0pt handicap
+    'common_opponent': {'handicap': 0, 'bet_on_field': None}
 }
 
-# Sport-specific handicap values (used for home_focus, away_focus)
+# Sport-specific handicap values (kept for backward compatibility, no longer used for home_focus/away_focus)
 SPORT_HANDICAP = {
     'nfl': 5,
     'nba': 9,

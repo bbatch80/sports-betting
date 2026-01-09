@@ -6,7 +6,10 @@ Serves predictions from S3 via API Gateway for mobile app consumption
 import json
 import boto3
 import logging
-from typing import Dict, Any
+import pandas as pd
+import io
+from datetime import datetime, timezone, timedelta
+from typing import Dict, Any, Optional
 
 # Configure logging
 logger = logging.getLogger()
@@ -18,6 +21,201 @@ s3_client = boto3.client('s3')
 # Configuration
 BUCKET_NAME = 'sports-betting-analytics-data'
 ALLOWED_SPORTS = ['nfl', 'nba', 'ncaam']
+
+# Sport-specific handicaps for strategies
+SPORT_HANDICAPS = {
+    'nfl': 5,
+    'nba': 9,
+    'ncaam': 10
+}
+
+# Strategy handicaps (for determining win/loss)
+STRATEGY_HANDICAPS = {
+    'home_focus': 11,
+    'away_focus': 11,
+    'elite_team_winpct': 11,
+    'elite_team_coverage': 11,
+    'hot_vs_cold_3': 11,
+    'hot_vs_cold_5': 11,
+    'hot_vs_cold_7': 11,
+    'opponent_perfect_form': 11,
+    'coverage_based': 0,
+    'common_opponent': 0,
+}
+
+
+def normalize_team_name(name: str) -> str:
+    """Normalize team name for matching"""
+    if not name:
+        return ""
+    return name.lower().strip().replace(" ", "").replace("-", "").replace(".", "")
+
+
+def is_past_date(date_str: str) -> bool:
+    """Check if a date string is in the past"""
+    try:
+        # Use EST timezone
+        est = timezone(timedelta(hours=-5))
+        today = datetime.now(est).date()
+        check_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+        return check_date < today
+    except Exception:
+        return False
+
+
+def get_results_for_date(sport_key: str, date_str: str) -> pd.DataFrame:
+    """
+    Get game results for a specific date from season results file
+    """
+    # Try Parquet first, then Excel
+    for file_format, read_func in [
+        (f"data/results/{sport_key}_season_results.parquet", lambda data: pd.read_parquet(io.BytesIO(data))),
+        (f"data/results/{sport_key}_season_results.xlsx", lambda data: pd.read_excel(io.BytesIO(data)))
+    ]:
+        try:
+            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=file_format)
+            df = read_func(response['Body'].read())
+
+            # Filter to completed games on this date
+            if 'game_date' in df.columns:
+                df['game_date'] = pd.to_datetime(df['game_date'])
+                target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                df = df[df['game_date'].dt.date == target_date]
+
+            # Filter to games with scores
+            df = df[df['home_score'].notna() & df['away_score'].notna()]
+
+            logger.info(f"Found {len(df)} completed games for {sport_key} on {date_str}")
+            return df
+
+        except s3_client.exceptions.NoSuchKey:
+            continue
+        except Exception as e:
+            logger.error(f"Error reading results: {e}")
+            continue
+
+    return pd.DataFrame()
+
+
+def calculate_bet_result(home_score: float, away_score: float, closing_spread: float,
+                         bet_on_home: bool, handicap: float) -> str:
+    """
+    Calculate bet result (win/loss/push)
+
+    Args:
+        home_score: Final home team score
+        away_score: Final away team score
+        closing_spread: The closing spread (negative = home favored)
+        bet_on_home: True if betting on home team
+        handicap: Additional handicap points for the strategy
+
+    Returns:
+        'win', 'loss', or 'push'
+    """
+    actual_margin = home_score - away_score
+    spread_result = actual_margin + closing_spread
+
+    if bet_on_home:
+        # Home covers if spread_result > handicap
+        if spread_result > handicap:
+            return 'win'
+        elif spread_result < handicap:
+            return 'loss'
+        else:
+            return 'push'
+    else:
+        # Away covers if spread_result < -handicap
+        if spread_result < -handicap:
+            return 'win'
+        elif spread_result > -handicap:
+            return 'loss'
+        else:
+            return 'push'
+
+
+def merge_results_into_predictions(predictions_data: Dict, results_df: pd.DataFrame, sport_key: str) -> Dict:
+    """
+    Merge game results into predictions data
+    """
+    if results_df.empty:
+        return predictions_data
+
+    games = predictions_data.get('games', [])
+
+    for game in games:
+        home_team_pred = normalize_team_name(game.get('home_team', ''))
+        away_team_pred = normalize_team_name(game.get('away_team', ''))
+
+        # Find matching result
+        for _, result in results_df.iterrows():
+            home_team_result = normalize_team_name(str(result.get('home_team', '')))
+            away_team_result = normalize_team_name(str(result.get('away_team', '')))
+
+            if home_team_pred == home_team_result and away_team_pred == away_team_result:
+                # Add scores to game
+                game['home_score'] = int(result['home_score'])
+                game['away_score'] = int(result['away_score'])
+                game['closing_spread'] = float(result.get('closing_spread', game.get('current_spread', 0)))
+                game['game_completed'] = True
+
+                # Calculate result for recommended bet
+                # Determine which team was recommended based on coverage %
+                home_cov = game.get('home_cover_pct_handicap', 0)
+                away_cov = game.get('away_cover_pct_handicap', 0)
+                bet_on_home = home_cov >= away_cov
+
+                # Use sport-specific handicap for result calculation
+                handicap = SPORT_HANDICAPS.get(sport_key, 9)
+
+                game['bet_result'] = calculate_bet_result(
+                    game['home_score'],
+                    game['away_score'],
+                    game['closing_spread'],
+                    bet_on_home,
+                    handicap
+                )
+
+                break
+        else:
+            # No result found
+            game['game_completed'] = False
+
+    # Also merge into strategies if present
+    strategies = predictions_data.get('strategies', {})
+    for strategy_name, strategy_data in strategies.items():
+        opportunities = strategy_data.get('opportunities', [])
+        handicap = STRATEGY_HANDICAPS.get(strategy_name, 0)
+
+        for opp in opportunities:
+            home_team_pred = normalize_team_name(opp.get('home_team', ''))
+            away_team_pred = normalize_team_name(opp.get('away_team', ''))
+
+            for _, result in results_df.iterrows():
+                home_team_result = normalize_team_name(str(result.get('home_team', '')))
+                away_team_result = normalize_team_name(str(result.get('away_team', '')))
+
+                if home_team_pred == home_team_result and away_team_pred == away_team_result:
+                    opp['home_score'] = int(result['home_score'])
+                    opp['away_score'] = int(result['away_score'])
+                    opp['closing_spread'] = float(result.get('closing_spread', opp.get('spread', 0)))
+                    opp['game_completed'] = True
+
+                    # Determine bet direction from opportunity data
+                    bet_on = opp.get('bet_on', '')
+                    bet_on_home = normalize_team_name(bet_on) == home_team_pred
+
+                    opp['bet_result'] = calculate_bet_result(
+                        opp['home_score'],
+                        opp['away_score'],
+                        opp['closing_spread'],
+                        bet_on_home,
+                        handicap
+                    )
+                    break
+            else:
+                opp['game_completed'] = False
+
+    return predictions_data
 
 
 def get_strategy_performance_from_s3(sport_key: str) -> Dict[str, Any]:
@@ -174,12 +372,15 @@ def get_elite_teams_from_s3(sport_key: str = None) -> Dict[str, Any]:
 def get_predictions_from_s3(sport_key: str, date: str = None) -> Dict[str, Any]:
     """
     Read predictions JSON from S3
-    
+
     Args:
         sport_key: Sport key (nfl, nba, ncaam)
         date: Optional date in YYYY-MM-DD format. If provided, looks for predictions_{sport}_{date}.json
               If not provided, looks for predictions_{sport}.json (today's predictions)
     """
+    predictions_data = None
+    is_past = date and is_past_date(date)
+
     if date:
         # Try date-specific predictions first
         s3_key = f"predictions/predictions_{sport_key}_{date}.json"
@@ -187,29 +388,56 @@ def get_predictions_from_s3(sport_key: str, date: str = None) -> Dict[str, Any]:
             response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
             predictions_data = json.loads(response['Body'].read().decode('utf-8'))
             logger.info(f"Successfully retrieved predictions for {sport_key} on {date}")
-            return predictions_data
         except s3_client.exceptions.NoSuchKey:
-            logger.info(f"No date-specific predictions found for {sport_key} on {date}, trying default")
-            # Fall through to default
-    
-    # Default: today's predictions
-    s3_key = f"predictions/predictions_{sport_key}.json"
-    
-    try:
-        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-        predictions_data = json.loads(response['Body'].read().decode('utf-8'))
-        logger.info(f"Successfully retrieved predictions for {sport_key}")
-        return predictions_data
-    except s3_client.exceptions.NoSuchKey:
-        logger.warning(f"No predictions found for {sport_key}")
-        return {
-            'sport': sport_key,
-            'error': 'No predictions available',
-            'message': f'Predictions for {sport_key.upper()} are not yet available'
-        }
-    except Exception as e:
-        logger.error(f"Error reading predictions from S3: {e}")
-        raise
+            logger.info(f"No date-specific predictions found for {sport_key} on {date}")
+            # For past dates, don't fall back to today's predictions
+            if is_past:
+                return {
+                    'sport': sport_key,
+                    'prediction_date': date,
+                    'error': 'No predictions available',
+                    'message': f'No predictions were recorded for {sport_key.upper()} on {date}',
+                    'games': [],
+                    'has_results': False
+                }
+            # For today, fall through to default file
+
+    # If no date-specific predictions found, try default (today's)
+    if predictions_data is None:
+        s3_key = f"predictions/predictions_{sport_key}.json"
+        try:
+            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
+            predictions_data = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Successfully retrieved predictions for {sport_key}")
+        except s3_client.exceptions.NoSuchKey:
+            logger.warning(f"No predictions found for {sport_key}")
+            return {
+                'sport': sport_key,
+                'error': 'No predictions available',
+                'message': f'Predictions for {sport_key.upper()} are not yet available'
+            }
+        except Exception as e:
+            logger.error(f"Error reading predictions from S3: {e}")
+            raise
+
+    # If date is in the past, merge game results into predictions
+    if date and is_past_date(date):
+        try:
+            results_df = get_results_for_date(sport_key, date)
+            if not results_df.empty:
+                predictions_data = merge_results_into_predictions(predictions_data, results_df, sport_key)
+                predictions_data['has_results'] = True
+                logger.info(f"Merged {len(results_df)} results into predictions for {sport_key} on {date}")
+            else:
+                predictions_data['has_results'] = False
+                logger.info(f"No results found to merge for {sport_key} on {date}")
+        except Exception as e:
+            logger.error(f"Error merging results: {e}")
+            predictions_data['has_results'] = False
+    else:
+        predictions_data['has_results'] = False
+
+    return predictions_data
 
 
 def create_response(status_code: int, body: Dict[str, Any], cors_headers: Dict[str, str] = None) -> Dict[str, Any]:

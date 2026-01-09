@@ -17,19 +17,41 @@ import {
 } from 'react-native';
 import { LineChart } from 'react-native-chart-kit';
 import { getStrategyPerformance } from '../services/apiService';
-import { SPORT_NAMES } from '../constants/api';
+import { SPORT_NAMES, STRATEGY_INFO } from '../constants/api';
 
 const screenWidth = Dimensions.get('window').width;
 
 // Strategy colors for chart lines
 const STRATEGY_COLORS = {
-  home_focus: '#2196F3',      // Blue
-  away_focus: '#4CAF50',      // Green
-  coverage_based: '#FF9800',  // Orange
-  elite_team: '#9C27B0',      // Purple
-  hot_vs_cold: '#F44336',     // Red
+  // 11-point handicap strategies
+  home_focus: '#2196F3',           // Blue
+  away_focus: '#4CAF50',           // Green
+  elite_team_winpct: '#9C27B0',    // Purple
+  elite_team_coverage: '#673AB7',  // Deep Purple
+  hot_vs_cold_3: '#E91E63',        // Pink
+  hot_vs_cold_5: '#F44336',        // Red
+  hot_vs_cold_7: '#FF5722',        // Deep Orange
   opponent_perfect_form: '#00BCD4', // Cyan
-  common_opponent: '#795548', // Brown
+  // 0-point handicap strategies
+  coverage_based: '#FF9800',       // Orange
+  common_opponent: '#795548',      // Brown
+};
+
+// Filter strategies by handicap value
+const filterStrategiesByHandicap = (strategies, filter) => {
+  if (filter === 'all') return strategies;
+
+  const targetHandicap = parseInt(filter, 10);
+  const filtered = {};
+
+  Object.entries(strategies).forEach(([key, value]) => {
+    const info = STRATEGY_INFO[key];
+    if (info && info.handicap === targetHandicap) {
+      filtered[key] = value;
+    }
+  });
+
+  return filtered;
 };
 
 const StrategyPerformanceScreen = () => {
@@ -39,6 +61,7 @@ const StrategyPerformanceScreen = () => {
   const [error, setError] = useState(null);
   const [selectedSport, setSelectedSport] = useState('nba');
   const [visibleStrategies, setVisibleStrategies] = useState({});
+  const [handicapFilter, setHandicapFilter] = useState('all'); // 'all' | '11' | '0'
 
   const fetchPerformance = useCallback(async () => {
     try {
@@ -66,6 +89,18 @@ const StrategyPerformanceScreen = () => {
     fetchPerformance();
   }, [fetchPerformance]);
 
+  // Reset visible strategies when handicap filter changes
+  useEffect(() => {
+    if (performanceData?.strategies) {
+      const filtered = filterStrategiesByHandicap(performanceData.strategies, handicapFilter);
+      const visible = {};
+      Object.keys(filtered).forEach(key => {
+        visible[key] = true;
+      });
+      setVisibleStrategies(visible);
+    }
+  }, [handicapFilter, performanceData]);
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     fetchPerformance();
@@ -92,7 +127,7 @@ const StrategyPerformanceScreen = () => {
   const getChartData = () => {
     if (!performanceData?.strategies) return null;
 
-    const strategies = performanceData.strategies;
+    const strategies = filterStrategiesByHandicap(performanceData.strategies, handicapFilter);
     const visibleKeys = Object.keys(strategies).filter(key => visibleStrategies[key]);
 
     if (visibleKeys.length === 0) return null;
@@ -177,14 +212,49 @@ const StrategyPerformanceScreen = () => {
     );
   };
 
+  const renderHandicapFilter = () => {
+    const filters = [
+      { key: 'all', label: 'All' },
+      { key: '11', label: '11pt Handicap' },
+      { key: '0', label: '0pt Handicap' },
+    ];
+
+    return (
+      <View style={styles.handicapFilterContainer}>
+        <Text style={styles.filterLabel}>Handicap Filter:</Text>
+        <View style={styles.segmentedControl}>
+          {filters.map((filter) => (
+            <TouchableOpacity
+              key={filter.key}
+              style={[
+                styles.segmentButton,
+                handicapFilter === filter.key && styles.segmentButtonActive,
+              ]}
+              onPress={() => setHandicapFilter(filter.key)}
+            >
+              <Text style={[
+                styles.segmentButtonText,
+                handicapFilter === filter.key && styles.segmentButtonTextActive,
+              ]}>
+                {filter.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+    );
+  };
+
   const renderStrategyLegend = () => {
     if (!performanceData?.strategies) return null;
+
+    const filteredStrategies = filterStrategiesByHandicap(performanceData.strategies, handicapFilter);
 
     return (
       <View style={styles.legendContainer}>
         <Text style={styles.legendTitle}>Toggle Strategies</Text>
         <View style={styles.legendItems}>
-          {Object.entries(performanceData.strategies).map(([key, strat]) => (
+          {Object.entries(filteredStrategies).map(([key, strat]) => (
             <TouchableOpacity
               key={key}
               style={[
@@ -361,13 +431,17 @@ const StrategyPerformanceScreen = () => {
     );
   }
 
-  const strategies = performanceData?.strategies || {};
+  const allStrategies = performanceData?.strategies || {};
+  const strategies = filterStrategiesByHandicap(allStrategies, handicapFilter);
   const hasData = Object.keys(strategies).length > 0;
 
   return (
     <View style={styles.container}>
       {/* Sport Tabs */}
       {renderSportTabs()}
+
+      {/* Handicap Filter */}
+      {renderHandicapFilter()}
 
       <ScrollView
         refreshControl={
@@ -474,6 +548,43 @@ const styles = StyleSheet.create({
   },
   tabTextActive: {
     color: '#2196F3',
+  },
+  handicapFilterContainer: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#e0e0e0',
+  },
+  filterLabel: {
+    fontSize: 12,
+    color: '#666',
+    marginBottom: 8,
+    fontWeight: '500',
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: '#f0f0f0',
+    borderRadius: 8,
+    padding: 2,
+  },
+  segmentButton: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+  },
+  segmentButtonActive: {
+    backgroundColor: '#2196F3',
+  },
+  segmentButtonText: {
+    fontSize: 13,
+    color: '#666',
+    fontWeight: '500',
+  },
+  segmentButtonTextActive: {
+    color: '#fff',
   },
   scrollContent: {
     paddingBottom: 24,

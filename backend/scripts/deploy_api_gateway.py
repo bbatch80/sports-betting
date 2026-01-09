@@ -25,10 +25,10 @@ PREDICTIONS_API_FUNCTION_NAME = 'predictions-api'
 PREDICTIONS_API_CONFIG = {
     'description': 'Serves predictions from S3 via API Gateway',
     'timeout': 30,
-    'memory': 256,
+    'memory': 512,  # Increased for pandas operations when merging results
     'handler': 'lambda_function.lambda_handler',
     'runtime': 'python3.12',
-    'has_dependencies': False
+    'has_dependencies': True  # Now requires pandas for merging results
 }
 
 RESULTS_API_FUNCTION_NAME = 'results-api'
@@ -551,11 +551,26 @@ def main():
     if not predictions_function_dir.exists():
         print(f"✗ Function directory not found: {predictions_function_dir}")
         return 1
-    
-    # Step 1: Package predictions API
-    print("\nStep 1: Packaging predictions API...")
+
+    # Step 1: Install dependencies for predictions API (if needed)
+    if PREDICTIONS_API_CONFIG['has_dependencies']:
+        print("\nStep 1: Installing dependencies for predictions API...")
+        requirements_file = predictions_function_dir / 'requirements.txt'
+        if requirements_file.exists():
+            if not install_dependencies(str(predictions_function_dir), str(requirements_file)):
+                print(f"✗ Failed to install dependencies")
+                return 1
+        else:
+            print(f"  ⚠ No requirements.txt found, skipping dependencies")
+
+        # Step 2: Package predictions API
+        print("\nStep 2: Packaging predictions API...")
+    else:
+        # Step 1: Package predictions API (no dependencies)
+        print("\nStep 1: Packaging predictions API...")
+
     predictions_zip_path = create_deployment_package(
-        str(predictions_function_dir), 
+        str(predictions_function_dir),
         PREDICTIONS_API_FUNCTION_NAME,
         has_dependencies=PREDICTIONS_API_CONFIG['has_dependencies']
     )
@@ -563,8 +578,9 @@ def main():
         print(f"✗ Failed to create deployment package")
         return 1
     
-    # Step 2: Deploy predictions Lambda function
-    print("\nStep 2: Deploying predictions Lambda function...")
+    # Deploy predictions Lambda function
+    step_num = 3 if PREDICTIONS_API_CONFIG['has_dependencies'] else 2
+    print(f"\nStep {step_num}: Deploying predictions Lambda function...")
     predictions_lambda_arn = deploy_api_lambda_function(
         lambda_client, s3_client,
         PREDICTIONS_API_FUNCTION_NAME, 

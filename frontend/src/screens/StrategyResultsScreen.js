@@ -1,9 +1,10 @@
 /**
  * StrategyResultsScreen Component
  * Displays filtered predictions based on selected strategy with bottom tabs for each sport
+ * Includes date navigation to view past predictions with results
  */
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
@@ -12,10 +13,77 @@ import SportTabScreen from './SportTabScreen';
 
 const Tab = createBottomTabNavigator();
 
+// Helper function to format date for display
+const formatDisplayDate = (dateStr) => {
+  const date = new Date(dateStr + 'T12:00:00');
+  const today = new Date();
+  today.setHours(12, 0, 0, 0);
+
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  const dateOnly = new Date(date);
+  dateOnly.setHours(12, 0, 0, 0);
+
+  if (dateOnly.getTime() === today.getTime()) {
+    return 'Today';
+  } else if (dateOnly.getTime() === yesterday.getTime()) {
+    return 'Yesterday';
+  }
+
+  return date.toLocaleDateString('en-US', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  });
+};
+
+// Helper function to get date string in YYYY-MM-DD format
+const getDateString = (date) => {
+  return date.toISOString().split('T')[0];
+};
+
+// Helper function to check if a date is today
+const isToday = (dateStr) => {
+  const today = new Date();
+  return dateStr === getDateString(today);
+};
+
 const StrategyResultsScreen = ({ route, navigation }) => {
   const { strategy } = route.params;
   const [refreshing, setRefreshing] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(getDateString(new Date()));
   const strategyInfo = STRATEGY_INFO[strategy];
+
+  // Navigate to previous day
+  const goToPreviousDay = () => {
+    const current = new Date(selectedDate + 'T12:00:00');
+    current.setDate(current.getDate() - 1);
+    setSelectedDate(getDateString(current));
+  };
+
+  // Navigate to next day
+  const goToNextDay = () => {
+    const current = new Date(selectedDate + 'T12:00:00');
+    const today = new Date();
+    today.setHours(12, 0, 0, 0);
+
+    const next = new Date(current);
+    next.setDate(next.getDate() + 1);
+
+    // Don't allow going past today
+    if (next <= today) {
+      setSelectedDate(getDateString(next));
+    }
+  };
+
+  // Go to today
+  const goToToday = () => {
+    setSelectedDate(getDateString(new Date()));
+  };
+
+  // Check if can go to next day
+  const canGoNext = !isToday(selectedDate);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -28,6 +96,7 @@ const StrategyResultsScreen = ({ route, navigation }) => {
     <SportTabScreen
       sport={SPORTS.NFL}
       strategy={strategy}
+      date={selectedDate}
       onRefresh={handleRefresh}
       refreshing={refreshing}
     />
@@ -37,6 +106,7 @@ const StrategyResultsScreen = ({ route, navigation }) => {
     <SportTabScreen
       sport={SPORTS.NBA}
       strategy={strategy}
+      date={selectedDate}
       onRefresh={handleRefresh}
       refreshing={refreshing}
     />
@@ -46,9 +116,40 @@ const StrategyResultsScreen = ({ route, navigation }) => {
     <SportTabScreen
       sport={SPORTS.NCAAM}
       strategy={strategy}
+      date={selectedDate}
       onRefresh={handleRefresh}
       refreshing={refreshing}
     />
+  );
+
+  // Render date navigation
+  const renderDateNavigation = () => (
+    <View style={styles.dateNavContainer}>
+      <TouchableOpacity
+        style={styles.dateNavButton}
+        onPress={goToPreviousDay}
+      >
+        <Text style={styles.dateNavButtonText}>{'<'}</Text>
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={styles.dateDisplay}
+        onPress={goToToday}
+      >
+        <Text style={styles.dateText}>{formatDisplayDate(selectedDate)}</Text>
+        {!isToday(selectedDate) && (
+          <Text style={styles.tapToReturnText}>Tap to return to today</Text>
+        )}
+      </TouchableOpacity>
+
+      <TouchableOpacity
+        style={[styles.dateNavButton, !canGoNext && styles.dateNavButtonDisabled]}
+        onPress={goToNextDay}
+        disabled={!canGoNext}
+      >
+        <Text style={[styles.dateNavButtonText, !canGoNext && styles.dateNavButtonTextDisabled]}>{'>'}</Text>
+      </TouchableOpacity>
+    </View>
   );
 
   return (
@@ -68,6 +169,8 @@ const StrategyResultsScreen = ({ route, navigation }) => {
             <Text style={styles.headerDescription}>{strategyInfo.description}</Text>
           </View>
         </View>
+        {/* Date navigation */}
+        {renderDateNavigation()}
       </SafeAreaView>
 
       {/* Bottom tabs for each sport */}
@@ -169,6 +272,50 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#666',
     textAlign: 'center',
+  },
+  dateNavContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    backgroundColor: '#f5f5f5',
+    borderTopWidth: 1,
+    borderTopColor: '#e0e0e0',
+  },
+  dateNavButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#2196F3',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dateNavButtonDisabled: {
+    backgroundColor: '#e0e0e0',
+  },
+  dateNavButtonText: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: '#fff',
+  },
+  dateNavButtonTextDisabled: {
+    color: '#999',
+  },
+  dateDisplay: {
+    flex: 1,
+    alignItems: 'center',
+    paddingHorizontal: 16,
+  },
+  dateText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#333',
+  },
+  tapToReturnText: {
+    fontSize: 12,
+    color: '#2196F3',
+    marginTop: 2,
   },
 });
 

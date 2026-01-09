@@ -52,15 +52,28 @@ SPORTS_CONFIG = {
 DEFAULT_REGIONS = ['us']
 API_RATE_LIMIT_DELAY = 1.0
 
+# Home/Away Focus strategy configuration
+HOME_AWAY_HANDICAP = 11  # Fixed 11-point handicap for home_focus/away_focus strategies
+
 # Elite team strategy configuration
 ELITE_PERCENTILE = 0.75  # Top 25% by win percentage
 GOOD_FORM_THRESHOLD = 3  # Last 5 games avg spread performance > 3
+ELITE_HANDICAP_POINTS = 11  # 11-point handicap for elite team strategies
 
 # Form-based strategy configuration (Hot vs Cold, Perfect Form)
+FORM_HANDICAP_POINTS = 11   # 11-point handicap for form-based strategies
+FORM_GAMES_LOOKBACK = 5     # Default lookback for perfect form strategy
+
+# Hot vs Cold configuration - multiple lookback windows
+HOT_COLD_CONFIG = {
+    3: {'hot_min': 2, 'cold_max': 0},   # Hot: ≥2/3 (67%+), Cold: 0/3 (0%)
+    5: {'hot_min': 3, 'cold_max': 2},   # Hot: ≥3/5 (60%+), Cold: ≤2/5 (40%)
+    7: {'hot_min': 4, 'cold_max': 3},   # Hot: ≥4/7 (57%+), Cold: ≤3/7 (43%)
+}
+
+# Legacy thresholds (for backward compatibility in calculate_team_form_for_game)
 HOT_FORM_THRESHOLD = 0.60   # 60% coverage = hot (3+ of last 5)
 COLD_FORM_THRESHOLD = 0.40  # 40% coverage = cold (2 or less of last 5)
-FORM_GAMES_LOOKBACK = 5     # Last 5 games for form calculation
-FORM_HANDICAP_POINTS = 11   # 11-point handicap for form-based strategies
 
 
 def get_api_key() -> str:
@@ -371,6 +384,48 @@ def calculate_team_standings(df_completed: pd.DataFrame) -> pd.DataFrame:
     return df_teams
 
 
+def calculate_team_standings_by_coverage(df_completed: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate team standings based on spread coverage percentage.
+
+    Returns DataFrame with columns:
+    - team, games, covers, cover_pct, tier (Elite/Mid/Bottom)
+    """
+    all_teams = set(df_completed['home_team'].unique()) | set(df_completed['away_team'].unique())
+
+    team_stats = []
+    for team in all_teams:
+        home_games = df_completed[df_completed['home_team'] == team]
+        away_games = df_completed[df_completed['away_team'] == team]
+
+        # Calculate spread covers
+        home_covers = (home_games['spread_result_difference'] > 0).sum() if len(home_games) > 0 else 0
+        away_covers = (away_games['spread_result_difference'] < 0).sum() if len(away_games) > 0 else 0
+
+        total_games = len(home_games) + len(away_games)
+        total_covers = home_covers + away_covers
+
+        if total_games > 0:
+            team_stats.append({
+                'team': team,
+                'games': total_games,
+                'covers': total_covers,
+                'cover_pct': total_covers / total_games
+            })
+
+    df_teams = pd.DataFrame(team_stats).sort_values('cover_pct', ascending=False)
+
+    # Classify tiers based on coverage percentage
+    q75 = df_teams['cover_pct'].quantile(ELITE_PERCENTILE)
+    q25 = df_teams['cover_pct'].quantile(1 - ELITE_PERCENTILE)
+
+    df_teams['tier'] = df_teams['cover_pct'].apply(
+        lambda x: 'Elite' if x >= q75 else ('Bottom' if x <= q25 else 'Mid')
+    )
+
+    return df_teams
+
+
 def calculate_recent_form(df_completed: pd.DataFrame, team_tier_map: Dict[str, str]) -> pd.DataFrame:
     """
     Calculate recent form (last 5 games spread performance) for each team
@@ -408,10 +463,19 @@ def calculate_recent_form(df_completed: pd.DataFrame, team_tier_map: Dict[str, s
 def generate_elite_team_opportunities(
     df_standings: pd.DataFrame,
     df_form: pd.DataFrame,
-    today_games_df: pd.DataFrame
+    today_games_df: pd.DataFrame,
+    strategy_type: str = 'winpct',
+    df_standings_winpct: pd.DataFrame = None
 ) -> List[Dict[str, Any]]:
     """
     Generate elite team opportunities - elite teams in good form with games today
+
+    Args:
+        df_standings: Standings DataFrame (used for elite tier determination)
+        df_form: Form DataFrame with team tier and good form status
+        today_games_df: Today's games
+        strategy_type: 'winpct' or 'coverage' - determines elite ranking method
+        df_standings_winpct: Win% standings for showing opponent win% (always passed for reference)
 
     Returns list of opportunities with game and team details
     """
@@ -443,7 +507,7 @@ def generate_elite_team_opportunities(
         for position, elite_team in elite_teams_in_game:
             opponent = away_team if position == 'home' else home_team
 
-            # Get standings info
+            # Get standings info based on strategy type
             team_standings = df_standings[df_standings['team'] == elite_team]
             opp_standings = df_standings[df_standings['team'] == opponent]
 
@@ -451,9 +515,9 @@ def generate_elite_team_opportunities(
             team_form = df_form[df_form['team'] == elite_team]
 
             opp_tier = opp_standings.iloc[0]['tier'] if len(opp_standings) > 0 else 'Unknown'
-            opp_win_pct = float(opp_standings.iloc[0]['win_pct'] * 100) if len(opp_standings) > 0 else None
 
-            opportunities.append({
+            # Build opportunity dict based on strategy type
+            opp_dict = {
                 'game_time_est': game.get('game_time_est'),
                 'home_team': home_team,
                 'away_team': away_team,
@@ -462,11 +526,32 @@ def generate_elite_team_opportunities(
                 'elite_team_position': position,
                 'opponent': opponent,
                 'opponent_tier': opp_tier,
-                'elite_team_win_pct': float(team_standings.iloc[0]['win_pct'] * 100) if len(team_standings) > 0 else None,
-                'elite_team_point_diff': float(team_standings.iloc[0]['point_diff_avg']) if len(team_standings) > 0 else None,
                 'elite_team_last_5_spread': float(team_form.iloc[0]['last_5_avg_spread']) if len(team_form) > 0 else None,
-                'opponent_win_pct': opp_win_pct
-            })
+                'handicap_points': ELITE_HANDICAP_POINTS,
+                'strategy_type': strategy_type
+            }
+
+            if strategy_type == 'winpct':
+                opp_dict['elite_team_win_pct'] = float(team_standings.iloc[0]['win_pct'] * 100) if len(team_standings) > 0 else None
+                opp_dict['elite_team_point_diff'] = float(team_standings.iloc[0]['point_diff_avg']) if len(team_standings) > 0 else None
+                # Get opponent win %
+                if df_standings_winpct is not None:
+                    opp_wp = df_standings_winpct[df_standings_winpct['team'] == opponent]
+                    opp_dict['opponent_win_pct'] = float(opp_wp.iloc[0]['win_pct'] * 100) if len(opp_wp) > 0 else None
+                else:
+                    opp_dict['opponent_win_pct'] = float(opp_standings.iloc[0]['win_pct'] * 100) if len(opp_standings) > 0 and 'win_pct' in opp_standings.columns else None
+            else:  # coverage
+                opp_dict['elite_team_cover_pct'] = float(team_standings.iloc[0]['cover_pct'] * 100) if len(team_standings) > 0 else None
+                # Get opponent cover %
+                opp_dict['opponent_cover_pct'] = float(opp_standings.iloc[0]['cover_pct'] * 100) if len(opp_standings) > 0 else None
+                # Also include win % for reference
+                if df_standings_winpct is not None:
+                    team_wp = df_standings_winpct[df_standings_winpct['team'] == elite_team]
+                    opp_wp = df_standings_winpct[df_standings_winpct['team'] == opponent]
+                    opp_dict['elite_team_win_pct'] = float(team_wp.iloc[0]['win_pct'] * 100) if len(team_wp) > 0 else None
+                    opp_dict['opponent_win_pct'] = float(opp_wp.iloc[0]['win_pct'] * 100) if len(opp_wp) > 0 else None
+
+            opportunities.append(opp_dict)
 
     # Sort by elite team's recent form (best form first)
     opportunities.sort(key=lambda x: x.get('elite_team_last_5_spread') or 0, reverse=True)
@@ -477,7 +562,10 @@ def generate_elite_team_opportunities(
 def calculate_team_form_for_game(
     df_completed: pd.DataFrame,
     team: str,
-    as_of_date: datetime
+    as_of_date: datetime,
+    lookback: int = FORM_GAMES_LOOKBACK,
+    hot_min: int = None,
+    cold_max: int = None
 ) -> Dict[str, Any]:
     """
     Calculate a team's form (last 5 games spread coverage) as of a specific date.
@@ -488,19 +576,25 @@ def calculate_team_form_for_game(
         df_completed: Historical completed games DataFrame
         team: Team name to calculate form for
         as_of_date: Calculate form only using games before this date
+        lookback: Number of games to look back (default: FORM_GAMES_LOOKBACK)
+        hot_min: Minimum covers to be considered "hot" (default: None, uses 60% threshold)
+        cold_max: Maximum covers to be considered "cold" (default: None, uses 40% threshold)
 
     Returns:
         Dictionary with form stats:
-        - last_5_games: list of coverage results (True/False)
-        - last_5_coverage_pct: percentage of games covered in last 5 (0.0 to 1.0)
-        - last_5_results: string like "4/5"
-        - games_count: number of games used (may be < 5)
-        - is_hot: True if coverage >= 60%
-        - is_cold: True if coverage <= 40%
-        - is_perfect: True if coverage == 100% (5/5)
+        - last_n_games: list of coverage results (True/False)
+        - last_n_coverage_pct: percentage of games covered (0.0 to 1.0)
+        - last_n_results: string like "4/5"
+        - games_count: number of games used (may be < lookback)
+        - covers_count: number of covers
+        - is_hot: True if meets hot threshold
+        - is_cold: True if meets cold threshold
+        - is_perfect: True if coverage == 100%
     """
     # Filter to games before the as_of_date
-    df_before = df_completed[df_completed['game_date'] < as_of_date].copy()
+    # Convert as_of_date to pandas Timestamp for comparison with datetime64 column
+    as_of_ts = pd.Timestamp(as_of_date).tz_localize(None) if hasattr(as_of_date, 'tzinfo') and as_of_date.tzinfo else pd.Timestamp(as_of_date)
+    df_before = df_completed[df_completed['game_date'] < as_of_ts].copy()
     df_before = df_before.sort_values('game_date')
 
     # Get team's games (both home and away)
@@ -522,17 +616,18 @@ def calculate_team_form_for_game(
                 'covered': covered
             })
 
-    # Sort by date and get last 5
+    # Sort by date and get last n games
     team_games = sorted(team_games, key=lambda x: x['date'])
-    last_n = team_games[-FORM_GAMES_LOOKBACK:] if len(team_games) >= FORM_GAMES_LOOKBACK else team_games
+    last_n = team_games[-lookback:] if len(team_games) >= lookback else team_games
 
     games_count = len(last_n)
     if games_count == 0:
         return {
-            'last_5_games': [],
-            'last_5_coverage_pct': None,
-            'last_5_results': '0/0',
+            'last_n_games': [],
+            'last_n_coverage_pct': None,
+            'last_n_results': '0/0',
             'games_count': 0,
+            'covers_count': 0,
             'is_hot': False,
             'is_cold': False,
             'is_perfect': False
@@ -541,30 +636,108 @@ def calculate_team_form_for_game(
     covers = sum(1 for g in last_n if g['covered'])
     coverage_pct = covers / games_count
 
+    # Determine hot/cold status using provided thresholds or percentage-based defaults
+    if hot_min is not None and cold_max is not None:
+        # Use count-based thresholds (for Hot vs Cold variants)
+        is_hot = covers >= hot_min and games_count >= lookback
+        is_cold = covers <= cold_max and games_count >= lookback
+    else:
+        # Use percentage-based thresholds (legacy behavior)
+        is_hot = coverage_pct >= HOT_FORM_THRESHOLD
+        is_cold = coverage_pct <= COLD_FORM_THRESHOLD
+
     return {
+        'last_n_games': [g['covered'] for g in last_n],
+        'last_n_coverage_pct': coverage_pct,
+        'last_n_results': f"{covers}/{games_count}",
+        'games_count': games_count,
+        'covers_count': covers,
+        'is_hot': is_hot,
+        'is_cold': is_cold,
+        'is_perfect': coverage_pct == 1.0 and games_count >= lookback,
+        # Legacy fields for backward compatibility
         'last_5_games': [g['covered'] for g in last_n],
         'last_5_coverage_pct': coverage_pct,
-        'last_5_results': f"{covers}/{games_count}",
-        'games_count': games_count,
-        'is_hot': coverage_pct >= HOT_FORM_THRESHOLD,
-        'is_cold': coverage_pct <= COLD_FORM_THRESHOLD,
-        'is_perfect': coverage_pct == 1.0 and games_count >= FORM_GAMES_LOOKBACK
+        'last_5_results': f"{covers}/{games_count}"
+    }
+
+
+def calculate_current_streak(
+    df_completed: pd.DataFrame,
+    team: str,
+    as_of_date: datetime
+) -> Dict[str, Any]:
+    """
+    Calculate a team's current win/loss streak for spread coverage.
+
+    Args:
+        df_completed: Historical completed games DataFrame
+        team: Team name
+        as_of_date: Calculate streak only using games before this date
+
+    Returns:
+        Dictionary with streak info:
+        - streak_type: 'W' for winning streak, 'L' for losing streak
+        - streak_count: number of consecutive games
+        - streak_display: string like "W3" or "L2"
+    """
+    # Filter to games before the as_of_date
+    # Convert as_of_date to pandas Timestamp for comparison with datetime64 column
+    as_of_ts = pd.Timestamp(as_of_date).tz_localize(None) if hasattr(as_of_date, 'tzinfo') and as_of_date.tzinfo else pd.Timestamp(as_of_date)
+    df_before = df_completed[df_completed['game_date'] < as_of_ts].copy()
+    df_before = df_before.sort_values('game_date', ascending=False)  # Most recent first
+
+    # Get team's games in reverse chronological order
+    team_games = []
+    for _, row in df_before.iterrows():
+        if row['home_team'] == team:
+            covered = row['spread_result_difference'] > 0
+            team_games.append(covered)
+        elif row['away_team'] == team:
+            covered = row['spread_result_difference'] < 0
+            team_games.append(covered)
+
+    if not team_games:
+        return {
+            'streak_type': None,
+            'streak_count': 0,
+            'streak_display': '-'
+        }
+
+    # Count current streak (how many consecutive same results from most recent)
+    current_result = team_games[0]  # Most recent game result
+    streak_count = 0
+    for result in team_games:
+        if result == current_result:
+            streak_count += 1
+        else:
+            break
+
+    streak_type = 'W' if current_result else 'L'
+    streak_display = f"{streak_type}{streak_count}"
+
+    return {
+        'streak_type': streak_type,
+        'streak_count': streak_count,
+        'streak_display': streak_display
     }
 
 
 def generate_hot_vs_cold_opportunities(
     df_completed: pd.DataFrame,
-    today_games_df: pd.DataFrame
+    today_games_df: pd.DataFrame,
+    lookback: int = None
 ) -> List[Dict[str, Any]]:
     """
-    Generate hot vs cold opportunities.
+    Generate hot vs cold opportunities for a specific lookback window.
 
-    Strategy: When a "hot" team (60%+ coverage in last 5) plays a "cold" team
-    (40%- coverage in last 5), bet on the hot team to cover an 11-point handicap.
+    Strategy: When a "hot" team plays a "cold" team, bet on the hot team
+    to cover an 11-point handicap.
 
     Args:
         df_completed: Historical completed games
         today_games_df: Today's games DataFrame
+        lookback: Number of games to look back (3, 5, or 7). If None, generates for all 3.
 
     Returns:
         List of opportunities with hot/cold team info
@@ -575,68 +748,110 @@ def generate_hot_vs_cold_opportunities(
     est = timezone(timedelta(hours=-5))
     today_date = datetime.now(est)
 
-    for _, game in today_games_df.iterrows():
-        home_team = game.get('home_team', '')
-        away_team = game.get('away_team', '')
+    # Determine which lookback windows to process
+    if lookback is not None:
+        lookbacks_to_process = [lookback]
+    else:
+        lookbacks_to_process = list(HOT_COLD_CONFIG.keys())
 
-        if not home_team or not away_team:
-            continue
+    for lb in lookbacks_to_process:
+        config = HOT_COLD_CONFIG.get(lb, {'hot_min': 3, 'cold_max': 2})
+        hot_min = config['hot_min']
+        cold_max = config['cold_max']
 
-        # Calculate form for both teams
-        home_form = calculate_team_form_for_game(df_completed, home_team, today_date)
-        away_form = calculate_team_form_for_game(df_completed, away_team, today_date)
+        for _, game in today_games_df.iterrows():
+            home_team = game.get('home_team', '')
+            away_team = game.get('away_team', '')
 
-        # Skip if either team doesn't have enough games
-        if home_form['games_count'] < FORM_GAMES_LOOKBACK or away_form['games_count'] < FORM_GAMES_LOOKBACK:
-            continue
+            if not home_team or not away_team:
+                continue
 
-        # Check for hot vs cold matchup
-        hot_team = None
-        cold_team = None
-        hot_form = None
-        cold_form = None
+            # Calculate form for both teams with specified lookback
+            home_form = calculate_team_form_for_game(
+                df_completed, home_team, today_date,
+                lookback=lb, hot_min=hot_min, cold_max=cold_max
+            )
+            away_form = calculate_team_form_for_game(
+                df_completed, away_team, today_date,
+                lookback=lb, hot_min=hot_min, cold_max=cold_max
+            )
 
-        if home_form['is_hot'] and away_form['is_cold']:
-            hot_team = home_team
-            cold_team = away_team
-            hot_form = home_form
-            cold_form = away_form
-            hot_position = 'home'
-            cold_position = 'away'
-        elif away_form['is_hot'] and home_form['is_cold']:
-            hot_team = away_team
-            cold_team = home_team
-            hot_form = away_form
-            cold_form = home_form
-            hot_position = 'away'
-            cold_position = 'home'
+            # Skip if either team doesn't have enough games
+            if home_form['games_count'] < lb or away_form['games_count'] < lb:
+                continue
 
-        # Only create opportunity if we have a clear hot vs cold matchup
-        if hot_team and cold_team:
-            form_differential = (hot_form['last_5_coverage_pct'] - cold_form['last_5_coverage_pct']) * 100
+            # Check for hot vs cold matchup
+            hot_team = None
+            cold_team = None
+            hot_form_data = None
+            cold_form_data = None
 
-            opportunities.append({
-                'game_time_est': game.get('game_time_est'),
-                'home_team': home_team,
-                'away_team': away_team,
-                'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
-                'hot_team': hot_team,
-                'hot_team_position': hot_position,
-                'hot_team_last_5_coverage_pct': round(hot_form['last_5_coverage_pct'] * 100, 1),
-                'hot_team_last_5_results': hot_form['last_5_results'],
-                'cold_team': cold_team,
-                'cold_team_position': cold_position,
-                'cold_team_last_5_coverage_pct': round(cold_form['last_5_coverage_pct'] * 100, 1),
-                'cold_team_last_5_results': cold_form['last_5_results'],
-                'form_differential': round(form_differential, 1),
-                'bet_on': hot_team,
-                'handicap_points': FORM_HANDICAP_POINTS
-            })
+            if home_form['is_hot'] and away_form['is_cold']:
+                hot_team = home_team
+                cold_team = away_team
+                hot_form_data = home_form
+                cold_form_data = away_form
+                hot_position = 'home'
+                cold_position = 'away'
+            elif away_form['is_hot'] and home_form['is_cold']:
+                hot_team = away_team
+                cold_team = home_team
+                hot_form_data = away_form
+                cold_form_data = home_form
+                hot_position = 'away'
+                cold_position = 'home'
+
+            # Only create opportunity if we have a clear hot vs cold matchup
+            if hot_team and cold_team:
+                form_differential = (hot_form_data['last_n_coverage_pct'] - cold_form_data['last_n_coverage_pct']) * 100
+
+                # Calculate current streaks for both teams
+                hot_streak = calculate_current_streak(df_completed, hot_team, today_date)
+                cold_streak = calculate_current_streak(df_completed, cold_team, today_date)
+
+                opportunities.append({
+                    'game_time_est': game.get('game_time_est'),
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'current_spread': float(game.get('current_spread')) if pd.notna(game.get('current_spread')) else None,
+                    'hot_team': hot_team,
+                    'hot_team_position': hot_position,
+                    'hot_team_last_n_coverage_pct': round(hot_form_data['last_n_coverage_pct'] * 100, 1),
+                    'hot_team_last_n_results': hot_form_data['last_n_results'],
+                    'hot_team_current_streak': hot_streak['streak_display'],
+                    'cold_team': cold_team,
+                    'cold_team_position': cold_position,
+                    'cold_team_last_n_coverage_pct': round(cold_form_data['last_n_coverage_pct'] * 100, 1),
+                    'cold_team_last_n_results': cold_form_data['last_n_results'],
+                    'cold_team_current_streak': cold_streak['streak_display'],
+                    'form_differential': round(form_differential, 1),
+                    'bet_on': hot_team,
+                    'handicap_points': FORM_HANDICAP_POINTS,
+                    'lookback_games': lb,
+                    'hot_threshold': f">={hot_min}/{lb}",
+                    'cold_threshold': f"<={cold_max}/{lb}"
+                })
 
     # Sort by form differential (largest advantage first)
     opportunities.sort(key=lambda x: x.get('form_differential', 0), reverse=True)
 
     return opportunities
+
+
+def generate_hot_vs_cold_opportunities_all_variants(
+    df_completed: pd.DataFrame,
+    today_games_df: pd.DataFrame
+) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Generate hot vs cold opportunities for all 3 variants (3, 5, 7 game lookbacks).
+
+    Returns a dictionary with keys 'hot_vs_cold_3', 'hot_vs_cold_5', 'hot_vs_cold_7'
+    """
+    return {
+        'hot_vs_cold_3': generate_hot_vs_cold_opportunities(df_completed, today_games_df, lookback=3),
+        'hot_vs_cold_5': generate_hot_vs_cold_opportunities(df_completed, today_games_df, lookback=5),
+        'hot_vs_cold_7': generate_hot_vs_cold_opportunities(df_completed, today_games_df, lookback=7),
+    }
 
 
 def generate_opponent_perfect_form_opportunities(
@@ -1162,19 +1377,41 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     df_team_stats = calculate_team_statistics(df_completed)
     logger.info(f"Calculated stats for {len(df_team_stats)} teams")
     
-    # Calculate handicap statistics
+    # Calculate handicap statistics (sport-specific, for legacy compatibility)
     df_team_stats_handicap = calculate_handicap_statistics(df_completed, handicap_points)
     logger.info(f"Calculated {handicap_points}-point handicap stats for {len(df_team_stats_handicap)} teams")
 
-    # Calculate team standings and recent form for elite team strategy
-    df_standings = calculate_team_standings(df_completed)
-    elite_teams_count = len(df_standings[df_standings['tier'] == 'Elite'])
-    logger.info(f"Calculated standings for {len(df_standings)} teams ({elite_teams_count} elite)")
+    # Calculate fixed 11pt handicap statistics for home_focus/away_focus strategies
+    df_team_stats_handicap_11pt = calculate_handicap_statistics(df_completed, HOME_AWAY_HANDICAP)
+    logger.info(f"Calculated {HOME_AWAY_HANDICAP}-point handicap stats for home/away focus strategies")
 
-    team_tier_map = df_standings.set_index('team')['tier'].to_dict()
-    df_form = calculate_recent_form(df_completed, team_tier_map)
-    elite_good_form_count = len(df_form[(df_form['tier'] == 'Elite') & (df_form['is_good_form'] == True)])
-    logger.info(f"Calculated recent form: {elite_good_form_count} elite teams in good form")
+    # Calculate team standings for elite team strategy (by win %)
+    df_standings_winpct = calculate_team_standings(df_completed)
+    elite_teams_winpct_count = len(df_standings_winpct[df_standings_winpct['tier'] == 'Elite'])
+    logger.info(f"Calculated win% standings for {len(df_standings_winpct)} teams ({elite_teams_winpct_count} elite)")
+
+    # Calculate team standings by spread coverage % (for elite_team_coverage variant)
+    df_standings_coverage = calculate_team_standings_by_coverage(df_completed)
+    elite_teams_coverage_count = len(df_standings_coverage[df_standings_coverage['tier'] == 'Elite'])
+    logger.info(f"Calculated coverage standings for {len(df_standings_coverage)} teams ({elite_teams_coverage_count} elite)")
+
+    # Calculate recent form for win% elite teams
+    team_tier_map_winpct = df_standings_winpct.set_index('team')['tier'].to_dict()
+    df_form_winpct = calculate_recent_form(df_completed, team_tier_map_winpct)
+    elite_good_form_winpct_count = len(df_form_winpct[(df_form_winpct['tier'] == 'Elite') & (df_form_winpct['is_good_form'] == True)])
+    logger.info(f"Calculated win% form: {elite_good_form_winpct_count} elite teams in good form")
+
+    # Calculate recent form for coverage elite teams
+    team_tier_map_coverage = df_standings_coverage.set_index('team')['tier'].to_dict()
+    df_form_coverage = calculate_recent_form(df_completed, team_tier_map_coverage)
+    elite_good_form_coverage_count = len(df_form_coverage[(df_form_coverage['tier'] == 'Elite') & (df_form_coverage['is_good_form'] == True)])
+    logger.info(f"Calculated coverage form: {elite_good_form_coverage_count} elite teams in good form")
+
+    # Legacy aliases for backward compatibility
+    df_standings = df_standings_winpct
+    df_form = df_form_winpct
+    elite_teams_count = elite_teams_winpct_count
+    elite_good_form_count = elite_good_form_winpct_count
 
     # Fetch today's games
     today_games, today_date_str = fetch_todays_games(api_key, sport_key)
@@ -1244,7 +1481,26 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     )
     games_with_stats = games_with_stats.rename(columns={'cover_pct_handicap': 'away_cover_pct_handicap'})
     games_with_stats = games_with_stats.drop(columns=['team'])
-    
+
+    # Merge 11pt handicap stats for home_focus/away_focus strategies
+    games_with_stats = games_with_stats.merge(
+        df_team_stats_handicap_11pt[['team', 'cover_pct_handicap']],
+        left_on='home_team',
+        right_on='team',
+        how='left'
+    )
+    games_with_stats = games_with_stats.rename(columns={'cover_pct_handicap': 'home_cover_pct_handicap_11pt'})
+    games_with_stats = games_with_stats.drop(columns=['team'])
+
+    games_with_stats = games_with_stats.merge(
+        df_team_stats_handicap_11pt[['team', 'cover_pct_handicap']],
+        left_on='away_team',
+        right_on='team',
+        how='left'
+    )
+    games_with_stats = games_with_stats.rename(columns={'cover_pct_handicap': 'away_cover_pct_handicap_11pt'})
+    games_with_stats = games_with_stats.drop(columns=['team'])
+
     # Merge team trend statistics (for coverage-based strategy)
     # Note: home_cover_pct and away_cover_pct already exist from earlier merge, so we use _full suffix
     games_with_stats = games_with_stats.merge(
@@ -1306,30 +1562,30 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     ].copy()
     
     # Generate opportunities for each strategy
-    
-    # Strategy 1: Home Focus (bet on home team when they have better handicap coverage)
+
+    # Strategy 1: Home Focus (bet on home team when they have better 11pt handicap coverage)
     home_focus_opportunities = games_with_enough_data[
-        (games_with_enough_data['home_cover_pct_handicap'].notna()) &
-        (games_with_enough_data['away_cover_pct_handicap'].notna()) &
-        (games_with_enough_data['home_cover_pct_handicap'] > games_with_enough_data['away_cover_pct_handicap'])
+        (games_with_enough_data['home_cover_pct_handicap_11pt'].notna()) &
+        (games_with_enough_data['away_cover_pct_handicap_11pt'].notna()) &
+        (games_with_enough_data['home_cover_pct_handicap_11pt'] > games_with_enough_data['away_cover_pct_handicap_11pt'])
     ].copy()
     if len(home_focus_opportunities) > 0:
         home_focus_opportunities['handicap_pct_difference'] = (
-            home_focus_opportunities['home_cover_pct_handicap'] - 
-            home_focus_opportunities['away_cover_pct_handicap']
+            home_focus_opportunities['home_cover_pct_handicap_11pt'] -
+            home_focus_opportunities['away_cover_pct_handicap_11pt']
         )
         home_focus_opportunities = home_focus_opportunities.sort_values('handicap_pct_difference', ascending=False)
-    
-    # Strategy 2: Away Focus (bet on away team when they have better handicap coverage)
+
+    # Strategy 2: Away Focus (bet on away team when they have better 11pt handicap coverage)
     away_focus_opportunities = games_with_enough_data[
-        (games_with_enough_data['home_cover_pct_handicap'].notna()) &
-        (games_with_enough_data['away_cover_pct_handicap'].notna()) &
-        (games_with_enough_data['away_cover_pct_handicap'] > games_with_enough_data['home_cover_pct_handicap'])
+        (games_with_enough_data['home_cover_pct_handicap_11pt'].notna()) &
+        (games_with_enough_data['away_cover_pct_handicap_11pt'].notna()) &
+        (games_with_enough_data['away_cover_pct_handicap_11pt'] > games_with_enough_data['home_cover_pct_handicap_11pt'])
     ].copy()
     if len(away_focus_opportunities) > 0:
         away_focus_opportunities['handicap_pct_difference'] = (
-            away_focus_opportunities['away_cover_pct_handicap'] - 
-            away_focus_opportunities['home_cover_pct_handicap']
+            away_focus_opportunities['away_cover_pct_handicap_11pt'] -
+            away_focus_opportunities['home_cover_pct_handicap_11pt']
         )
         away_focus_opportunities = away_focus_opportunities.sort_values('handicap_pct_difference', ascending=False)
     
@@ -1365,16 +1621,16 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
     if len(opportunities) > 0:
         if focus_team == 'away':
             opportunities['handicap_pct_difference'] = (
-                opportunities['away_cover_pct_handicap'] - 
-                opportunities['home_cover_pct_handicap']
+                opportunities['away_cover_pct_handicap_11pt'] -
+                opportunities['home_cover_pct_handicap_11pt']
             )
         else:  # focus_team == 'home'
             opportunities['handicap_pct_difference'] = (
-                opportunities['home_cover_pct_handicap'] - 
-                opportunities['away_cover_pct_handicap']
+                opportunities['home_cover_pct_handicap_11pt'] -
+                opportunities['away_cover_pct_handicap_11pt']
             )
         opportunities = opportunities.sort_values('handicap_pct_difference', ascending=False)
-    
+
     # Helper function to convert opportunities to JSON format
     def opportunities_to_json(opp_df, strategy_type):
         opp_list = []
@@ -1385,13 +1641,14 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
                 'home_team': row.get('home_team'),
                 'current_spread': float(row.get('current_spread')) if pd.notna(row.get('current_spread')) else None,
             }
-            
+
             if strategy_type in ['home_focus', 'away_focus']:
-                # Handicap-based strategies
+                # Handicap-based strategies (using 11pt handicap)
                 opp_dict.update({
-                    'away_cover_pct_handicap': float(row.get('away_cover_pct_handicap')) if pd.notna(row.get('away_cover_pct_handicap')) else None,
-                    'home_cover_pct_handicap': float(row.get('home_cover_pct_handicap')) if pd.notna(row.get('home_cover_pct_handicap')) else None,
-                    'handicap_pct_difference': float(row.get('handicap_pct_difference')) if pd.notna(row.get('handicap_pct_difference')) else None
+                    'away_cover_pct_handicap': float(row.get('away_cover_pct_handicap_11pt')) if pd.notna(row.get('away_cover_pct_handicap_11pt')) else None,
+                    'home_cover_pct_handicap': float(row.get('home_cover_pct_handicap_11pt')) if pd.notna(row.get('home_cover_pct_handicap_11pt')) else None,
+                    'handicap_pct_difference': float(row.get('handicap_pct_difference')) if pd.notna(row.get('handicap_pct_difference')) else None,
+                    'handicap_points': HOME_AWAY_HANDICAP
                 })
             elif strategy_type == 'coverage_based':
                 # Coverage-based strategy
@@ -1441,17 +1698,32 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
         common_opponent_predictions = generate_common_opponent_predictions(df_completed, df_today)
         logger.info(f"Generated {len(common_opponent_predictions)} common opponent predictions")
 
-    # Generate elite team opportunities
-    elite_team_opportunities = generate_elite_team_opportunities(
-        df_standings, df_form, df_today
+    # Generate elite team opportunities (Win % variant)
+    elite_team_winpct_opportunities = generate_elite_team_opportunities(
+        df_standings_winpct, df_form_winpct, df_today,
+        strategy_type='winpct', df_standings_winpct=df_standings_winpct
     )
-    logger.info(f"Generated {len(elite_team_opportunities)} elite team opportunities")
+    logger.info(f"Generated {len(elite_team_winpct_opportunities)} elite team (win%) opportunities")
 
-    # Generate hot vs cold opportunities
-    hot_vs_cold_opportunities = generate_hot_vs_cold_opportunities(
-        df_completed, df_today
+    # Generate elite team opportunities (Coverage % variant)
+    elite_team_coverage_opportunities = generate_elite_team_opportunities(
+        df_standings_coverage, df_form_coverage, df_today,
+        strategy_type='coverage', df_standings_winpct=df_standings_winpct
     )
-    logger.info(f"Generated {len(hot_vs_cold_opportunities)} hot vs cold opportunities")
+    logger.info(f"Generated {len(elite_team_coverage_opportunities)} elite team (coverage%) opportunities")
+
+    # Legacy: combine both for backward compatibility
+    elite_team_opportunities = elite_team_winpct_opportunities
+
+    # Generate hot vs cold opportunities (all 3 variants)
+    hot_vs_cold_variants = generate_hot_vs_cold_opportunities_all_variants(df_completed, df_today)
+    hot_vs_cold_3_opportunities = hot_vs_cold_variants['hot_vs_cold_3']
+    hot_vs_cold_5_opportunities = hot_vs_cold_variants['hot_vs_cold_5']
+    hot_vs_cold_7_opportunities = hot_vs_cold_variants['hot_vs_cold_7']
+    logger.info(f"Generated hot vs cold opportunities: 3-game={len(hot_vs_cold_3_opportunities)}, 5-game={len(hot_vs_cold_5_opportunities)}, 7-game={len(hot_vs_cold_7_opportunities)}")
+
+    # Legacy: keep combined for backward compatibility
+    hot_vs_cold_opportunities = hot_vs_cold_5_opportunities
 
     # Generate opponent perfect form (regression) opportunities
     opponent_perfect_form_opportunities = generate_opponent_perfect_form_opportunities(
@@ -1469,7 +1741,8 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
             'summary': {
                 'opportunities': len(home_focus_list),
                 'average_difference': float(home_focus_opportunities['handicap_pct_difference'].mean()) if len(home_focus_opportunities) > 0 else None,
-                'largest_difference': float(home_focus_opportunities['handicap_pct_difference'].max()) if len(home_focus_opportunities) > 0 else None
+                'largest_difference': float(home_focus_opportunities['handicap_pct_difference'].max()) if len(home_focus_opportunities) > 0 else None,
+                'handicap_points': HOME_AWAY_HANDICAP
             }
         },
         'away_focus': {
@@ -1477,7 +1750,8 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
             'summary': {
                 'opportunities': len(away_focus_list),
                 'average_difference': float(away_focus_opportunities['handicap_pct_difference'].mean()) if len(away_focus_opportunities) > 0 else None,
-                'largest_difference': float(away_focus_opportunities['handicap_pct_difference'].max()) if len(away_focus_opportunities) > 0 else None
+                'largest_difference': float(away_focus_opportunities['handicap_pct_difference'].max()) if len(away_focus_opportunities) > 0 else None,
+                'handicap_points': HOME_AWAY_HANDICAP
             }
         },
         'coverage_based': {
@@ -1501,29 +1775,75 @@ def generate_predictions_for_sport(api_key: str, sport_key: str) -> Dict[str, An
             }
         }
 
-    # Add elite_team strategy
-    strategies['elite_team'] = {
-        'opportunities': elite_team_opportunities,
+    # Add elite_team_winpct strategy (top 25% by win %)
+    strategies['elite_team_winpct'] = {
+        'opportunities': elite_team_winpct_opportunities,
         'summary': {
-            'opportunities': len(elite_team_opportunities),
-            'elite_teams_total': elite_teams_count,
-            'elite_teams_good_form': elite_good_form_count,
+            'opportunities': len(elite_team_winpct_opportunities),
+            'elite_teams_total': elite_teams_winpct_count,
+            'elite_teams_good_form': elite_good_form_winpct_count,
             'elite_percentile': ELITE_PERCENTILE,
-            'good_form_threshold': GOOD_FORM_THRESHOLD
+            'good_form_threshold': GOOD_FORM_THRESHOLD,
+            'handicap_points': ELITE_HANDICAP_POINTS,
+            'ranking_method': 'win_percentage'
         }
     }
 
-    # Add hot_vs_cold strategy (form-based)
-    strategies['hot_vs_cold'] = {
-        'opportunities': hot_vs_cold_opportunities,
+    # Add elite_team_coverage strategy (top 25% by spread coverage %)
+    strategies['elite_team_coverage'] = {
+        'opportunities': elite_team_coverage_opportunities,
         'summary': {
-            'opportunities': len(hot_vs_cold_opportunities),
-            'hot_threshold': HOT_FORM_THRESHOLD,
-            'cold_threshold': COLD_FORM_THRESHOLD,
-            'form_lookback_games': FORM_GAMES_LOOKBACK,
+            'opportunities': len(elite_team_coverage_opportunities),
+            'elite_teams_total': elite_teams_coverage_count,
+            'elite_teams_good_form': elite_good_form_coverage_count,
+            'elite_percentile': ELITE_PERCENTILE,
+            'good_form_threshold': GOOD_FORM_THRESHOLD,
+            'handicap_points': ELITE_HANDICAP_POINTS,
+            'ranking_method': 'spread_coverage'
+        }
+    }
+
+    # Legacy: keep elite_team for backward compatibility (uses win%)
+    strategies['elite_team'] = strategies['elite_team_winpct']
+
+    # Add hot_vs_cold_3 strategy (3-game lookback)
+    strategies['hot_vs_cold_3'] = {
+        'opportunities': hot_vs_cold_3_opportunities,
+        'summary': {
+            'opportunities': len(hot_vs_cold_3_opportunities),
+            'lookback_games': 3,
+            'hot_threshold': f">={HOT_COLD_CONFIG[3]['hot_min']}/3",
+            'cold_threshold': f"<={HOT_COLD_CONFIG[3]['cold_max']}/3",
             'handicap_points': FORM_HANDICAP_POINTS
         }
     }
+
+    # Add hot_vs_cold_5 strategy (5-game lookback)
+    strategies['hot_vs_cold_5'] = {
+        'opportunities': hot_vs_cold_5_opportunities,
+        'summary': {
+            'opportunities': len(hot_vs_cold_5_opportunities),
+            'lookback_games': 5,
+            'hot_threshold': f">={HOT_COLD_CONFIG[5]['hot_min']}/5",
+            'cold_threshold': f"<={HOT_COLD_CONFIG[5]['cold_max']}/5",
+            'handicap_points': FORM_HANDICAP_POINTS
+        }
+    }
+
+    # Add hot_vs_cold_7 strategy (7-game lookback)
+    strategies['hot_vs_cold_7'] = {
+        'opportunities': hot_vs_cold_7_opportunities,
+        'summary': {
+            'opportunities': len(hot_vs_cold_7_opportunities),
+            'lookback_games': 7,
+            'hot_threshold': f">={HOT_COLD_CONFIG[7]['hot_min']}/7",
+            'cold_threshold': f"<={HOT_COLD_CONFIG[7]['cold_max']}/7",
+            'handicap_points': FORM_HANDICAP_POINTS
+        }
+    }
+
+    # Legacy: keep hot_vs_cold for backward compatibility (uses 5-game lookback)
+    strategies['hot_vs_cold'] = strategies['hot_vs_cold_5']
 
     # Add opponent_perfect_form strategy (regression-based)
     strategies['opponent_perfect_form'] = {
