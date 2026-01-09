@@ -45,6 +45,19 @@ from src.analysis.insights import (
     get_pattern_summary,
     get_opportunity_summary,
 )
+from src.analysis.network_ratings import (
+    get_team_rankings,
+    get_rankings_dataframe,
+)
+from src.analysis.backtest_ratings import (
+    get_games_with_ratings,
+    backtest_gap_strategy,
+    backtest_rank_strategy,
+    analyze_gap_thresholds,
+    generate_backtest_report,
+    get_game_by_game_results,
+    BREAKEVEN_WIN_RATE,
+)
 
 
 # =============================================================================
@@ -92,7 +105,7 @@ st.sidebar.title("📊 Analytics Dashboard")
 # Navigation
 page = st.sidebar.radio(
     "Navigation",
-    ["🎯 Opportunities", "Macro Trends", "Micro (Team) Analysis", "Streak Analysis", "Exploration", "Verification"]
+    ["🎯 Opportunities", "🏆 Power Rankings", "📈 Backtest Strategies", "Macro Trends", "Micro (Team) Analysis", "Streak Analysis", "Exploration", "Verification"]
 )
 
 st.sidebar.markdown("---")
@@ -815,6 +828,335 @@ def page_opportunities():
 
 
 # =============================================================================
+# Page: Power Rankings
+# =============================================================================
+
+def page_power_rankings():
+    st.title("🏆 Power Rankings")
+    st.markdown(f"""
+    **Network-based team ratings** using iterative strength propagation for **{selected_sport}**.
+
+    Two rating types are computed:
+    - **Win Rating**: True team strength based on game outcomes
+    - **ATS Rating**: Market-beating ability based on spread coverage
+
+    The **Market Gap** (ATS - Win) reveals market efficiency:
+    - 🟢 **Positive gap**: Market undervalues this team (potential betting edge)
+    - 🔴 **Negative gap**: Market overvalues this team (fade candidate)
+    """)
+
+    # Settings
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        min_games = st.slider("Min Games for Reliable", 1, 20, 5, key="pr_min_games")
+    with col2:
+        sort_by = st.selectbox("Sort By", ["Market Gap", "Win Rating", "ATS Rating"], key="pr_sort")
+    with col3:
+        show_unreliable = st.checkbox("Show teams < min games", value=False, key="pr_unreliable")
+
+    # Get rankings
+    with st.spinner("Computing power rankings..."):
+        rankings = get_team_rankings(conn, selected_sport, min_games=min_games)
+
+    if not rankings:
+        st.warning(f"No ranking data found for {selected_sport}")
+        return
+
+    # Filter unreliable if needed
+    if not show_unreliable:
+        display_rankings = [r for r in rankings if r.is_reliable]
+    else:
+        display_rankings = rankings
+
+    if not display_rankings:
+        st.warning("No teams meet the minimum games threshold")
+        return
+
+    # Sort based on selection
+    if sort_by == "Win Rating":
+        display_rankings = sorted(display_rankings, key=lambda x: x.win_rating, reverse=True)
+    elif sort_by == "ATS Rating":
+        display_rankings = sorted(display_rankings, key=lambda x: x.ats_rating, reverse=True)
+    # Market Gap is already default sort
+
+    # Summary metrics
+    reliable_count = len([r for r in rankings if r.is_reliable])
+    st.markdown("---")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Teams", len(rankings))
+    col2.metric(f"Reliable ({min_games}+ games)", reliable_count)
+    col3.metric("Most Undervalued", display_rankings[0].team if display_rankings else "N/A")
+
+    # Main rankings table
+    st.markdown("---")
+    st.subheader("Rankings Table")
+
+    # Build dataframe for display
+    table_data = []
+    for r in display_rankings:
+        gap_color = "🟢" if r.market_gap > 0.02 else ("🔴" if r.market_gap < -0.02 else "⚪")
+        table_data.append({
+            "Team": r.team,
+            "Win Rtg": f"{r.win_rating:.3f}",
+            "Win Rank": r.win_rank,
+            "ATS Rtg": f"{r.ats_rating:.3f}",
+            "ATS Rank": r.ats_rank,
+            "Gap": f"{gap_color} {r.market_gap:+.3f}",
+            "Record": r.win_record,
+            "ATS Rec": r.ats_record,
+            "Games": r.games_analyzed,
+        })
+
+    df = pd.DataFrame(table_data)
+    st.dataframe(df, hide_index=True, use_container_width=True)
+
+    # Visualization
+    st.markdown("---")
+    st.subheader("Rating Comparison")
+
+    tab1, tab2 = st.tabs(["Market Gap Chart", "Win vs ATS Scatter"])
+
+    with tab1:
+        # Bar chart of market gap (top and bottom)
+        top_n = min(15, len(display_rankings))
+
+        fig = go.Figure()
+
+        # Top by market gap (most undervalued)
+        top_teams = display_rankings[:top_n]
+        fig.add_trace(go.Bar(
+            y=[r.team for r in top_teams],
+            x=[r.market_gap * 100 for r in top_teams],
+            orientation='h',
+            marker_color=['#2ecc71' if r.market_gap > 0 else '#e74c3c' for r in top_teams],
+            text=[f"{r.market_gap:+.1%}" for r in top_teams],
+            textposition='auto',
+            name='Market Gap'
+        ))
+
+        fig.add_vline(x=0, line_dash="dash", line_color="gray")
+
+        fig.update_layout(
+            title=f"Top {top_n} Teams by Market Gap ({selected_sport})",
+            xaxis_title="Market Gap (ATS Rating - Win Rating) %",
+            yaxis_title="",
+            height=max(400, top_n * 30),
+            yaxis=dict(autorange="reversed")
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    with tab2:
+        # Scatter plot: Win Rating vs ATS Rating
+        scatter_data = pd.DataFrame([{
+            'team': r.team,
+            'win_rating': r.win_rating,
+            'ats_rating': r.ats_rating,
+            'market_gap': r.market_gap,
+            'games': r.games_analyzed
+        } for r in display_rankings])
+
+        fig = px.scatter(
+            scatter_data,
+            x='win_rating',
+            y='ats_rating',
+            hover_name='team',
+            color='market_gap',
+            color_continuous_scale=['#e74c3c', '#f0f0f0', '#2ecc71'],
+            color_continuous_midpoint=0,
+            size='games',
+            title=f"Win Rating vs ATS Rating ({selected_sport})",
+            labels={
+                'win_rating': 'Win Rating (True Strength)',
+                'ats_rating': 'ATS Rating (Market-Beating)',
+                'market_gap': 'Market Gap'
+            }
+        )
+
+        # Add diagonal line (where Win = ATS)
+        fig.add_trace(go.Scatter(
+            x=[0, 1],
+            y=[0, 1],
+            mode='lines',
+            line=dict(dash='dash', color='gray'),
+            name='Win = ATS',
+            showlegend=False
+        ))
+
+        fig.update_layout(height=500)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.caption("""
+        **How to read this chart:**
+        - Points **above** the diagonal line have higher ATS rating than Win rating → undervalued by market
+        - Points **below** the diagonal line have lower ATS rating than Win rating → overvalued by market
+        - Color intensity shows the magnitude of the gap
+        - Size represents games played
+        """)
+
+    # Interpretation guide
+    with st.expander("📖 How to Use Power Rankings"):
+        st.markdown("""
+        ### Understanding the Ratings
+
+        **Win Rating** measures true team strength based on game outcomes:
+        - Higher = better team (wins more games, by larger margins)
+        - Based on actual wins/losses, weighted by opponent strength and recency
+
+        **ATS Rating** measures market-beating ability:
+        - Higher = team covers spreads more often
+        - Since spreads account for team strength, this reveals market mispricing
+
+        ### The Key Insight: Market Gap
+
+        The **Market Gap** (ATS Rating - Win Rating) reveals market efficiency:
+
+        | Gap | Meaning | Action |
+        |-----|---------|--------|
+        | Large Positive (>5%) | Market consistently undervalues | Look to bet ON this team |
+        | Small (+/- 2%) | Market has them priced correctly | No edge |
+        | Large Negative (<-5%) | Market consistently overvalues | Look to fade this team |
+
+        ### Important Notes
+
+        - **Sample size matters**: Teams with <5 games may have unreliable ratings
+        - **Recency weighted**: Recent games count more (0.92 decay per week)
+        - **Network-based**: Ratings consider opponent strength transitively
+        - **Margin capped**: Blowouts capped at 20 points to reduce noise
+        """)
+
+
+# =============================================================================
+# Page: Backtest Strategies
+# =============================================================================
+
+def page_backtest():
+    st.title("📈 Backtest Strategies")
+    st.markdown(f"**Rating-based strategy backtesting** for **{selected_sport}**. Breakeven at -110 odds: **52.4%**")
+
+    games_df = get_games_with_ratings(conn, selected_sport)
+    if len(games_df) == 0:
+        st.warning(f"No games with historical ratings found. Run `python scripts/generate_historical_ratings.py` first.")
+        return
+
+    col1, col2 = st.columns(2)
+    col1.metric("Games Analyzed", len(games_df))
+    col2.metric("Avg Gap Diff", f"{games_df['gap_diff'].abs().mean():.3f}")
+
+    tab1, tab2, tab3 = st.tabs(["Gap Threshold Analysis", "Rank Strategies", "Game-by-Game"])
+
+    # Tab 1: Gap Threshold Analysis
+    with tab1:
+        st.subheader("Gap Threshold Analysis")
+        bet_direction = st.selectbox(
+            "Bet Direction", ["higher_gap", "lower_gap"],
+            format_func=lambda x: "Bet on Higher Gap Team" if x == "higher_gap" else "Fade Higher Gap Team"
+        )
+
+        threshold_df = analyze_gap_thresholds(games_df, bet_on=bet_direction)
+
+        if len(threshold_df) > 0:
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            fig.add_trace(go.Bar(
+                name='Win Rate', x=threshold_df['threshold'], y=threshold_df['win_rate'] * 100,
+                marker_color=['#2ecc71' if wr > BREAKEVEN_WIN_RATE else '#e74c3c' for wr in threshold_df['win_rate']],
+                text=threshold_df['win_rate'].apply(lambda x: f'{x:.1%}'), textposition='outside'
+            ), secondary_y=False)
+            fig.add_trace(go.Scatter(
+                name='ROI', x=threshold_df['threshold'], y=threshold_df['roi'] * 100,
+                mode='lines+markers', line=dict(color='#3498db', width=3)
+            ), secondary_y=True)
+            fig.add_hline(y=BREAKEVEN_WIN_RATE * 100, line_dash="dash", line_color="gray")
+            fig.update_layout(title=f"Win Rate & ROI by Gap Threshold ({selected_sport})",
+                              xaxis_title="Gap Threshold", height=450)
+            fig.update_yaxes(title_text="Win Rate (%)", range=[40, 80], secondary_y=False)
+            fig.update_yaxes(title_text="ROI (%)", secondary_y=True)
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Results table
+            display_df = threshold_df.copy()
+            display_df['Win Rate'] = display_df['win_rate'].apply(lambda x: f"{x:.1%}")
+            display_df['ROI'] = display_df['roi'].apply(lambda x: f"{x:+.1%}")
+            st.dataframe(display_df[['threshold', 'total_bets', 'wins', 'losses', 'Win Rate', 'ROI']], hide_index=True)
+
+            best = threshold_df.loc[threshold_df['roi'].idxmax()]
+            if best['roi'] > 0:
+                st.success(f"**Best: {best['threshold']:.2f}** → {best['win_rate']:.1%} win rate, {best['roi']:+.1%} ROI")
+
+    # Tab 2: Rank Strategies
+    with tab2:
+        st.subheader("Rank-Based Strategies")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            rank_type = st.selectbox("Rank Type", ["ats", "win"],
+                                     format_func=lambda x: "ATS Rank" if x == "ats" else "Win Rank")
+        with col2:
+            max_rank = st.slider("Bet on teams ranked ≤", 1, 20, 10)
+        with col3:
+            min_opponent_rank = st.slider("Against teams ranked ≥", 10, 50, 20)
+
+        result = backtest_rank_strategy(games_df, rank_type=rank_type, max_rank=max_rank, min_opponent_rank=min_opponent_rank)
+
+        if result.total_bets > 0:
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Bets", result.total_bets)
+            col2.metric("Record", f"{result.wins}-{result.losses}")
+            col3.metric("Win Rate", f"{result.win_rate:.1%}", delta=f"{result.edge:+.1%}")
+            col4.metric("ROI", f"{result.roi:+.1%}")
+
+            # Heatmap of rank combinations
+            combos = []
+            for max_r in [5, 10, 15, 20]:
+                for min_opp in [15, 20, 25, 30]:
+                    r = backtest_rank_strategy(games_df, rank_type=rank_type, max_rank=max_r, min_opponent_rank=min_opp)
+                    if r.total_bets >= 5:
+                        combos.append({'max_rank': f'Top {max_r}', 'min_opp': f'vs {min_opp}+', 'win_rate': r.win_rate})
+
+            if combos:
+                combo_df = pd.DataFrame(combos)
+                pivot = combo_df.pivot(index='max_rank', columns='min_opp', values='win_rate')
+                fig = px.imshow(pivot.values * 100, x=pivot.columns, y=pivot.index,
+                                color_continuous_scale=['#e74c3c', '#f0f0f0', '#2ecc71'],
+                                color_continuous_midpoint=BREAKEVEN_WIN_RATE * 100, text_auto='.1f')
+                fig.update_layout(height=350, title=f"{rank_type.upper()} Rank Win Rates")
+                st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No bets match criteria. Adjust thresholds.")
+
+    # Tab 3: Game-by-Game
+    with tab3:
+        st.subheader("Game-by-Game Results")
+        col1, col2 = st.columns(2)
+        with col1:
+            min_gap = st.slider("Min Gap Diff", 0.0, 0.5, 0.1, 0.05)
+        with col2:
+            show_filter = st.selectbox("Filter", ["All", "Wins Only", "Losses Only"])
+
+        filtered = games_df[games_df['gap_diff'].abs() >= min_gap].copy()
+        if show_filter == "Wins Only":
+            filtered = filtered[filtered['higher_gap_covered'] == True]
+        elif show_filter == "Losses Only":
+            filtered = filtered[filtered['higher_gap_covered'] == False]
+
+        filtered = filtered.sort_values('game_date', ascending=False)
+        st.caption(f"Showing {len(filtered)} games")
+
+        if len(filtered) > 0:
+            wins = filtered['higher_gap_covered'].sum()
+            win_rate = wins / len(filtered)
+            col1, col2 = st.columns(2)
+            col1.metric("Win Rate", f"{win_rate:.1%}")
+            col2.metric("Edge", f"{(win_rate - BREAKEVEN_WIN_RATE) * 100:+.1f}%")
+
+            display_df = filtered[['game_date', 'away_team', 'home_team', 'closing_spread',
+                                   'away_market_gap', 'home_market_gap', 'gap_diff', 'higher_gap_covered']].copy()
+            display_df['Result'] = display_df['higher_gap_covered'].apply(lambda x: '✅' if x else '❌')
+            display_df['gap_diff'] = display_df['gap_diff'].apply(lambda x: f"{x:+.3f}")
+            st.dataframe(display_df[['game_date', 'away_team', 'home_team', 'closing_spread', 'gap_diff', 'Result']],
+                         hide_index=True, use_container_width=True)
+
+
+# =============================================================================
 # Page: Exploration
 # =============================================================================
 
@@ -1015,6 +1357,10 @@ Example: If spread is -7 (home favored by 7):
 
 if page == "🎯 Opportunities":
     page_opportunities()
+elif page == "🏆 Power Rankings":
+    page_power_rankings()
+elif page == "📈 Backtest Strategies":
+    page_backtest()
 elif page == "Macro Trends":
     page_macro_trends()
 elif page == "Micro (Team) Analysis":

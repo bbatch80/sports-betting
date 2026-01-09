@@ -66,6 +66,33 @@ def init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_games_away_team ON games(away_team)
     ''')
 
+    # Historical ratings table (daily snapshots for backtesting)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS historical_ratings (
+            id INTEGER PRIMARY KEY,
+            sport TEXT NOT NULL,
+            snapshot_date DATE NOT NULL,
+            team TEXT NOT NULL,
+            win_rating REAL,
+            ats_rating REAL,
+            market_gap REAL,
+            games_analyzed INTEGER,
+            win_rank INTEGER,
+            ats_rank INTEGER,
+            UNIQUE(sport, snapshot_date, team)
+        )
+    ''')
+
+    # Indexes for historical_ratings
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_historical_ratings_lookup
+        ON historical_ratings(sport, snapshot_date)
+    ''')
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS idx_historical_ratings_team
+        ON historical_ratings(sport, team, snapshot_date)
+    ''')
+
     conn.commit()
 
 
