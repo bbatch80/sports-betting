@@ -1,12 +1,9 @@
 # Lambda Function Dependencies
-# Note: boto3 is provided by AWS Lambda runtime, don't include it
+# Note: boto3 is provided by AWS Lambda runtime
 
-pandas>=2.0.0
-openpyxl>=3.1.0
-pyarrow>=14.0.0
+# HTTP requests to Odds API
 requests>=2.31.0
+
+# Database connectivity
 sqlalchemy>=2.0.0
 psycopg2-binary>=2.9.0
-
-
-
