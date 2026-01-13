@@ -65,18 +65,36 @@ class AnalyticsRepository:
         create_tables(self.engine)
 
     def health_check(self) -> bool:
-        """
-        Verify database connectivity.
-
-        Returns:
-            True if connection is successful, False otherwise.
-        """
+        """Verify database connectivity."""
         try:
             with self.engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
             return True
         except Exception:
             return False
+
+    def _upsert(self, table, records: list, constraint: str, index_elements: list, update_cols: list) -> int:
+        """Execute upsert for a list of records. Handles SQLite vs PostgreSQL differences."""
+        if not records:
+            return 0
+        affected = 0
+        with self.engine.begin() as conn:
+            for record in records:
+                if self.config.is_postgresql:
+                    stmt = postgresql.insert(table).values(**record)
+                    stmt = stmt.on_conflict_do_update(
+                        constraint=constraint,
+                        set_={col: getattr(stmt.excluded, col) for col in update_cols},
+                    )
+                else:
+                    stmt = sqlite.insert(table).values(**record)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=index_elements,
+                        set_={col: getattr(stmt.excluded, col) for col in update_cols},
+                    )
+                result = conn.execute(stmt)
+                affected += result.rowcount
+        return affected
 
     # =========================================================================
     # Games Operations
@@ -156,38 +174,20 @@ class AnalyticsRepository:
         return df
 
     def insert_games(self, df: pd.DataFrame, sport: str) -> int:
-        """
-        Insert games from DataFrame with upsert logic.
-
-        Handles duplicates by updating existing records (same sport/date/teams).
-
-        Args:
-            df: DataFrame with columns:
-                - game_date, home_team, away_team
-                - closing_spread, home_score, away_score
-                - spread_result_difference (optional, calculated if missing)
-            sport: Sport identifier (NFL, NBA, NCAAM)
-
-        Returns:
-            Number of rows affected
-        """
+        """Insert games with upsert logic. Handles duplicates by updating existing records."""
         if df.empty:
             return 0
 
-        # Prepare records
         records = []
         for _, row in df.iterrows():
             # Calculate spread_result if not present
             spread_result = row.get("spread_result_difference")
             if spread_result is None or pd.isna(spread_result):
                 if pd.notna(row.get("home_score")) and pd.notna(row.get("away_score")):
-                    spread_result = (
-                        row["home_score"] - row["away_score"] - row["closing_spread"]
-                    )
+                    spread_result = row["home_score"] - row["away_score"] - row["closing_spread"]
                 else:
                     spread_result = None
 
-            # Format game_date
             game_date = row["game_date"]
             if hasattr(game_date, "strftime"):
                 game_date = game_date.strftime("%Y-%m-%d")
@@ -203,38 +203,12 @@ class AnalyticsRepository:
                 "spread_result": spread_result,
             })
 
-        affected = 0
-        with self.engine.begin() as conn:
-            for record in records:
-                if self.config.is_postgresql:
-                    # PostgreSQL: ON CONFLICT DO UPDATE
-                    stmt = postgresql.insert(games).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint="uq_game",
-                        set_={
-                            "closing_spread": stmt.excluded.closing_spread,
-                            "home_score": stmt.excluded.home_score,
-                            "away_score": stmt.excluded.away_score,
-                            "spread_result": stmt.excluded.spread_result,
-                        },
-                    )
-                else:
-                    # SQLite: ON CONFLICT DO UPDATE
-                    stmt = sqlite.insert(games).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["sport", "game_date", "home_team", "away_team"],
-                        set_={
-                            "closing_spread": stmt.excluded.closing_spread,
-                            "home_score": stmt.excluded.home_score,
-                            "away_score": stmt.excluded.away_score,
-                            "spread_result": stmt.excluded.spread_result,
-                        },
-                    )
-
-                result = conn.execute(stmt)
-                affected += result.rowcount
-
-        return affected
+        return self._upsert(
+            games, records,
+            constraint="uq_game",
+            index_elements=["sport", "game_date", "home_team", "away_team"],
+            update_cols=["closing_spread", "home_score", "away_score", "spread_result"],
+        )
 
     def get_all_teams(self, sport: Optional[str] = None) -> List[str]:
         """Get sorted list of all unique teams."""
@@ -288,62 +262,21 @@ class AnalyticsRepository:
     # =========================================================================
 
     def insert_ratings(self, df: pd.DataFrame) -> int:
-        """
-        Insert historical ratings with upsert logic.
-
-        Args:
-            df: DataFrame with columns:
-                - sport, snapshot_date, team
-                - win_rating, ats_rating, market_gap
-                - games_analyzed, win_rank, ats_rank
-
-        Returns:
-            Number of rows affected
-        """
+        """Insert historical ratings with upsert logic."""
         if df.empty:
             return 0
 
         records = df.to_dict("records")
-
-        # Format dates
         for record in records:
             if hasattr(record.get("snapshot_date"), "strftime"):
                 record["snapshot_date"] = record["snapshot_date"].strftime("%Y-%m-%d")
 
-        affected = 0
-        with self.engine.begin() as conn:
-            for record in records:
-                if self.config.is_postgresql:
-                    stmt = postgresql.insert(historical_ratings).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint="uq_rating",
-                        set_={
-                            "win_rating": stmt.excluded.win_rating,
-                            "ats_rating": stmt.excluded.ats_rating,
-                            "market_gap": stmt.excluded.market_gap,
-                            "games_analyzed": stmt.excluded.games_analyzed,
-                            "win_rank": stmt.excluded.win_rank,
-                            "ats_rank": stmt.excluded.ats_rank,
-                        },
-                    )
-                else:
-                    stmt = sqlite.insert(historical_ratings).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=["sport", "snapshot_date", "team"],
-                        set_={
-                            "win_rating": stmt.excluded.win_rating,
-                            "ats_rating": stmt.excluded.ats_rating,
-                            "market_gap": stmt.excluded.market_gap,
-                            "games_analyzed": stmt.excluded.games_analyzed,
-                            "win_rank": stmt.excluded.win_rank,
-                            "ats_rank": stmt.excluded.ats_rank,
-                        },
-                    )
-
-                result = conn.execute(stmt)
-                affected += result.rowcount
-
-        return affected
+        return self._upsert(
+            historical_ratings, records,
+            constraint="uq_rating",
+            index_elements=["sport", "snapshot_date", "team"],
+            update_cols=["win_rating", "ats_rating", "market_gap", "games_analyzed", "win_rank", "ats_rank"],
+        )
 
     def get_ratings(
         self,
