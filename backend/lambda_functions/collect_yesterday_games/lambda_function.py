@@ -10,9 +10,12 @@ import boto3
 import time
 import pandas as pd
 import io
+import os
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import logging
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 # Configure logging for CloudWatch
 logger = logging.getLogger()
@@ -40,6 +43,110 @@ SPORT_API_KEYS = {
 # Default settings
 DEFAULT_REGIONS = ['us']
 API_RATE_LIMIT_DELAY = 1.0
+
+# Database configuration
+DB_SECRET_NAME = 'sports-betting-db-credentials'
+_db_engine = None
+
+
+def get_database_url() -> Optional[str]:
+    """
+    Get DATABASE_URL from environment variable or Secrets Manager.
+    Environment variable takes precedence (for testing).
+    """
+    # Check environment variable first
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        return database_url
+
+    # Fall back to Secrets Manager
+    try:
+        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
+        secret = json.loads(response['SecretString'])
+        return secret.get('url')
+    except Exception as e:
+        logger.warning(f"Could not retrieve DATABASE_URL from Secrets Manager: {e}")
+        return None
+
+
+def get_db_engine():
+    """
+    Get or create database engine singleton.
+    Uses NullPool for Lambda (let RDS Proxy handle pooling).
+    """
+    global _db_engine
+    if _db_engine is None:
+        database_url = get_database_url()
+        if database_url:
+            _db_engine = create_engine(database_url, poolclass=NullPool)
+            logger.info("✓ Database engine created")
+    return _db_engine
+
+
+def write_games_to_database(df: pd.DataFrame, sport_key: str) -> int:
+    """
+    Write games to PostgreSQL database using upsert logic.
+
+    Returns number of rows affected.
+    """
+    engine = get_db_engine()
+    if engine is None:
+        logger.warning("No database connection available, skipping database write")
+        return 0
+
+    if len(df) == 0:
+        return 0
+
+    # Prepare data for insertion
+    games_data = []
+    for _, row in df.iterrows():
+        game_date = row.get('game_date')
+        if hasattr(game_date, 'date'):
+            game_date = game_date.date()
+        elif isinstance(game_date, str):
+            game_date = pd.to_datetime(game_date).date()
+
+        # Calculate spread_result if not present
+        spread_result = row.get('spread_result_difference')
+        if pd.isna(spread_result):
+            home_score = row.get('home_score')
+            away_score = row.get('away_score')
+            closing_spread = row.get('closing_spread')
+            if pd.notna(home_score) and pd.notna(away_score) and pd.notna(closing_spread):
+                spread_result = float(home_score) - float(away_score) + float(closing_spread)
+
+        games_data.append({
+            'sport': sport_key.upper(),
+            'game_date': game_date.isoformat() if game_date else None,
+            'home_team': row.get('home_team'),
+            'away_team': row.get('away_team'),
+            'closing_spread': float(row['closing_spread']) if pd.notna(row.get('closing_spread')) else None,
+            'home_score': int(row['home_score']) if pd.notna(row.get('home_score')) else None,
+            'away_score': int(row['away_score']) if pd.notna(row.get('away_score')) else None,
+            'spread_result': float(spread_result) if pd.notna(spread_result) else None,
+        })
+
+    # Upsert using PostgreSQL ON CONFLICT
+    upsert_sql = text("""
+        INSERT INTO games (sport, game_date, home_team, away_team, closing_spread, home_score, away_score, spread_result)
+        VALUES (:sport, :game_date, :home_team, :away_team, :closing_spread, :home_score, :away_score, :spread_result)
+        ON CONFLICT (sport, game_date, home_team, away_team)
+        DO UPDATE SET
+            closing_spread = COALESCE(EXCLUDED.closing_spread, games.closing_spread),
+            home_score = COALESCE(EXCLUDED.home_score, games.home_score),
+            away_score = COALESCE(EXCLUDED.away_score, games.away_score),
+            spread_result = COALESCE(EXCLUDED.spread_result, games.spread_result)
+    """)
+
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(upsert_sql, games_data)
+            affected = result.rowcount
+            logger.info(f"✓ Database: upserted {affected} games for {sport_key.upper()}")
+            return affected
+    except Exception as e:
+        logger.error(f"✗ Database write error: {e}")
+        return 0
 
 
 def get_api_key() -> str:
@@ -587,15 +694,19 @@ def process_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
     if 'spread_result_difference' in excel_df.columns:
         excel_df['spread_result_difference'] = excel_df['spread_result_difference'].round(1)
     
-    # Write to S3 (Excel and Parquet)
+    # Write to S3 (Excel and Parquet) - backup storage
     write_excel_to_s3(excel_df, sport_key)
     write_parquet_to_s3(combined_df, sport_key)
-    
+
+    # Write to PostgreSQL database - primary storage
+    db_rows = write_games_to_database(new_games_df, sport_key)
+
     return {
         'sport': sport_key,
         'existing_games': len(existing_df),
         'new_games': len(new_games_df),
-        'total_games': len(combined_df)
+        'total_games': len(combined_df),
+        'db_rows_affected': db_rows
     }
 
 

@@ -1,8 +1,6 @@
 # Lambda Function Dependencies
 # Note: boto3 is provided by AWS Lambda runtime, don't include it
 
-# Required for reading Excel and Parquet files from S3
-pandas>=2.0.0
-openpyxl>=3.1.0
-pyarrow>=10.0.0
-
+# Database connectivity
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0
