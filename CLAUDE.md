@@ -94,39 +94,157 @@ Prior to pushing any new code to github, ensure that no sensitive data is being 
 
 ```
 sports-betting/
-├── backend/              # Python backend (AWS Lambda, data collection, predictions)
-│   ├── src/              # Core modules (API client, config)
-│   ├── scripts/          # Collection and deployment scripts
-│   ├── lambda_functions/ # AWS Lambda functions
-│   ├── notebooks/        # Jupyter analysis notebooks
-│   ├── data/             # Local data storage
-│   ├── automation/       # macOS launchd automation
-│   └── docs/             # Backend documentation
-│
-├── frontend/             # React Native/Expo mobile app
+├── backend/                    # Python backend
 │   ├── src/
-│   │   ├── components/   # Reusable UI components
-│   │   ├── screens/      # App screens
-│   │   ├── services/     # API service layer
-│   │   ├── constants/    # API endpoints, config
-│   │   └── utils/        # Utility functions
-│   └── assets/           # Images, fonts
+│   │   ├── config.py           # Sport configs, DatabaseConfig
+│   │   ├── database.py         # DB facade (backward compat)
+│   │   ├── odds_api_client.py  # The Odds API client
+│   │   ├── db/                 # SQLAlchemy layer
+│   │   │   ├── engine.py       # Connection pooling
+│   │   │   ├── models.py       # Table definitions
+│   │   │   └── repository.py   # Query methods
+│   │   └── analysis/           # Prediction engine
+│   │       ├── metrics.py      # Team ratings
+│   │       ├── insights.py     # Streak patterns
+│   │       └── network_ratings.py
+│   ├── dashboard/
+│   │   └── app.py              # Streamlit analytics dashboard
+│   ├── lambda_functions/       # AWS Lambda (5 functions)
+│   ├── scripts/                # Deployment & operations
+│   ├── migrations/             # DB migrations
+│   ├── notebooks/              # Jupyter analysis
+│   └── data/                   # Local SQLite + Excel
 │
-└── CLAUDE.md             # This file
+├── frontend/                   # React Native/Expo mobile app
+│   └── src/
+│       ├── screens/            # HomeScreen, SportTabScreen, etc.
+│       ├── components/         # PredictionCard, StrategyOpportunityCard
+│       ├── services/           # apiService.js
+│       └── constants/          # api.js
+│
+└── CLAUDE.md
 ```
+
+---
+
+## Architecture Overview
+
+### System Diagram
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         USER INTERFACES                             │
+├─────────────────────────────────────────────────────────────────────┤
+│  Mobile App (React Native)     │  Analytics Dashboard (Streamlit)  │
+│  - Predictions display         │  - Strategy Overview              │
+│  - Strategy selection          │  - Today's Picks                  │
+│  - Performance charts          │  - Power Rankings                 │
+│  localhost:19000 (Expo)        │  - Backtest Strategies            │
+│                                │  localhost:8501                   │
+└───────────────┬────────────────┴──────────────┬────────────────────┘
+                │                               │
+                ▼                               ▼
+┌───────────────────────────────┐   ┌───────────────────────────────┐
+│       AWS API Gateway         │   │    Local SQLite Database      │
+│  GET /predictions/{sport}     │   │    backend/data/analytics.db  │
+│  GET /results/{sport}         │   │                               │
+│  GET /strategy-performance    │   │         OR (production)       │
+└───────────────┬───────────────┘   │                               │
+                │                   │    AWS RDS PostgreSQL         │
+                ▼                   │    sports-betting-analytics   │
+┌───────────────────────────────┐   └───────────────────────────────┘
+│      AWS Lambda Functions     │
+├───────────────────────────────┤
+│ collect_yesterday_games (6AM) │──→ The Odds API
+│ generate_predictions (6:30AM) │
+│ evaluate_strategy_results(3AM)│
+│ predictions_api               │
+│ results_api                   │
+└───────────────┬───────────────┘
+                │
+                ▼
+┌───────────────────────────────┐
+│          AWS S3               │
+│ predictions/*.json            │
+│ data/results/*.xlsx           │
+│ strategy_tracking/*.json      │
+└───────────────────────────────┘
+```
+
+### Database Schema
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         games                                   │
+├─────────────────────────────────────────────────────────────────┤
+│ id              INTEGER PRIMARY KEY                             │
+│ sport           VARCHAR(50)   -- NFL, NBA, NCAAM                │
+│ game_date       DATE                                            │
+│ home_team       VARCHAR(100)                                    │
+│ away_team       VARCHAR(100)                                    │
+│ closing_spread  FLOAT         -- negative = home favored        │
+│ home_score      INTEGER                                         │
+│ away_score      INTEGER                                         │
+│ spread_result   FLOAT         -- margin vs spread               │
+├─────────────────────────────────────────────────────────────────┤
+│ UNIQUE (sport, game_date, home_team, away_team)                 │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    historical_ratings                           │
+├─────────────────────────────────────────────────────────────────┤
+│ id              INTEGER PRIMARY KEY                             │
+│ sport           VARCHAR(50)                                     │
+│ snapshot_date   DATE          -- when calculated                │
+│ team            VARCHAR(100)                                    │
+│ win_rating      FLOAT         -- strength by wins               │
+│ ats_rating      FLOAT         -- strength by ATS                │
+│ market_gap      FLOAT         -- perception gap                 │
+│ games_analyzed  INTEGER                                         │
+│ win_rank        INTEGER                                         │
+│ ats_rank        INTEGER                                         │
+├─────────────────────────────────────────────────────────────────┤
+│ UNIQUE (sport, snapshot_date, team)                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Lambda Schedule (EST)
+| Time | Function | Purpose |
+|------|----------|---------|
+| 3:00 AM | evaluate_strategy_results | Match predictions to outcomes |
+| 6:00 AM | collect_yesterday_games | Get scores + closing spreads |
+| 6:30 AM | generate_predictions | Create today's opportunities |
+| On-demand | predictions_api | Serve predictions to apps |
+| On-demand | results_api | Serve historical results |
+
+### Streamlit Dashboard Pages
+Run with: `cd backend && streamlit run dashboard/app.py`
+
+| Page | Purpose |
+|------|---------|
+| Strategy Overview | All strategies at a glance |
+| Today's Picks | Live recommendations |
+| Power Rankings | Team strength ratings |
+| Backtest Strategies | Historical performance |
+| Macro Trends | League-wide ATS analysis |
+| Micro Analysis | Team-specific deep dive |
+| Streak Analysis | Streak patterns |
+| Exploration | Ad-hoc queries |
 
 ## Tech Stack
 
 ### Backend
 - **Language**: Python 3.12+
-- **Cloud**: AWS (S3, Lambda, Secrets Manager, EventBridge, API Gateway)
+- **Database**: SQLite (dev) / PostgreSQL (prod via AWS RDS)
+- **ORM**: SQLAlchemy Core
+- **Cloud**: AWS (S3, Lambda, RDS, Secrets Manager, EventBridge, API Gateway)
 - **Data**: pandas, openpyxl, pyarrow
 - **API**: The Odds API
+- **Dashboard**: Streamlit (localhost:8501)
 
 ### Frontend
 - **Framework**: React Native with Expo
 - **Navigation**: React Navigation (stack, bottom tabs)
 - **HTTP Client**: Axios
+- **Charts**: react-native-chart-kit
 - **Platform**: iOS, Android, Web
 
 ## Common Commands
@@ -138,6 +256,9 @@ cd backend
 # Install dependencies
 pip install -r requirements.txt
 
+# Run Streamlit dashboard
+streamlit run dashboard/app.py    # Opens http://localhost:8501
+
 # Run daily collection locally
 python3 scripts/collect_yesterday_games.py
 
@@ -146,6 +267,10 @@ python3 scripts/deploy_lambda_functions.py
 
 # Deploy API Gateway
 python3 scripts/deploy_api_gateway.py
+
+# AWS RDS setup
+python3 scripts/aws_rds_setup.py
+python3 scripts/aws_update_lambda_env.py
 ```
 
 ### Frontend
@@ -195,7 +320,8 @@ API base URL is configured in `frontend/src/constants/api.js`
 
 ## AWS Resources
 - **S3 Bucket**: `sports-betting-analytics-data`
-- **Secret**: `odds-api-key` (Secrets Manager)
+- **RDS**: `sports-betting-analytics` (PostgreSQL 15, db.t3.micro)
+- **Secrets**: `odds-api-key`, `sports-betting-db-credentials`
 - **Region**: `us-east-1`
 
 ## Code Style
