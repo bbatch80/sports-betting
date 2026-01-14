@@ -1,0 +1,9 @@
+# Lambda Function Dependencies
+# Note: boto3 is provided by AWS Lambda runtime
+
+# HTTP requests to Odds API
+requests>=2.31.0
+
+# Database connectivity
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0

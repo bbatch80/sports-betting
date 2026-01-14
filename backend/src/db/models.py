@@ -11,11 +11,13 @@ Why Core instead of ORM?
 Tables:
     games: Historical game results with spreads and scores
     historical_ratings: Daily team rating snapshots for backtesting
+    todays_games: Scheduled games fetched from Odds API (pre-computed daily)
 """
 
 from sqlalchemy import (
     Column,
     Date,
+    DateTime,
     Float,
     Index,
     Integer,
@@ -113,6 +115,42 @@ Index(
     historical_ratings.c.team,
     historical_ratings.c.snapshot_date
 )
+
+
+# =============================================================================
+# Today's Games Table (scheduled games fetched from Odds API)
+# =============================================================================
+
+todays_games = Table(
+    "todays_games",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Game identification
+    Column("sport", String(50), nullable=False),  # NFL, NBA, NCAAM
+    Column("game_date", Date, nullable=False),
+    Column("commence_time", DateTime, nullable=False),  # Full timestamp with time
+    Column("home_team", String(100), nullable=False),
+    Column("away_team", String(100), nullable=False),
+
+    # Betting data
+    Column("spread", Float),  # Spread for home team (negative = favored)
+    Column("spread_source", String(50)),  # Bookmaker name (e.g., DraftKings)
+
+    # Timestamps
+    Column("created_at", DateTime),
+    Column("updated_at", DateTime),
+
+    # Ensure no duplicate games
+    UniqueConstraint(
+        "sport", "game_date", "home_team", "away_team",
+        name="uq_todays_game"
+    ),
+)
+
+# Indexes for efficient lookups
+Index("idx_todays_games_sport_date", todays_games.c.sport, todays_games.c.game_date)
 
 
 # =============================================================================

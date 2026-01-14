@@ -69,8 +69,8 @@ from src.analysis.tier_matchups import (
 )
 from src.analysis.todays_recommendations import (
     generate_recommendations,
-    get_api_key,
     get_combined_confidence,
+    get_games_last_updated,
 )
 
 
@@ -776,13 +776,12 @@ def page_todays_picks():
     with st.spinner("Detecting patterns..."):
         patterns = cached_detect_patterns(conn)
 
-    # Check for API key
-    api_key = get_api_key()
-
-    if not api_key:
-        st.warning("⚠️ Odds API key not configured. Set `ODDS_API_KEY` environment variable or configure AWS Secrets Manager.")
-        st.info("The API key is required to fetch today's game schedule from The Odds API.")
-        return
+    # Show last updated timestamp
+    last_updated = get_games_last_updated(conn)
+    if last_updated:
+        st.caption(f"Games last updated: {last_updated.strftime('%Y-%m-%d %I:%M %p')} UTC")
+    else:
+        st.warning("No games loaded yet. Run the collect_todays_games Lambda to fetch today's schedule.")
 
     # Sport filter
     picks_sport = st.selectbox(
@@ -802,14 +801,13 @@ def page_todays_picks():
 
     tier_patterns = get_cached_tier_patterns(conn, sport_to_use)
 
-    # Generate recommendations
-    with st.spinner("Fetching today's games and analyzing..."):
+    # Generate recommendations (games fetched from database)
+    with st.spinner("Analyzing today's games..."):
         game_recommendations = generate_recommendations(
             conn,
             sport_to_use,
             patterns,
             tier_patterns,
-            api_key
         )
 
     if not game_recommendations:

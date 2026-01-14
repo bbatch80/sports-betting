@@ -31,7 +31,7 @@ from sqlalchemy.dialects import postgresql, sqlite
 
 from src.config import DatabaseBackend, DatabaseConfig
 from src.db.engine import get_engine
-from src.db.models import create_tables, games, historical_ratings
+from src.db.models import create_tables, games, historical_ratings, todays_games
 
 
 class AnalyticsRepository:
@@ -402,6 +402,103 @@ class AnalyticsRepository:
                     "end_date": end_date,
                 },
             )
+
+    # =========================================================================
+    # Today's Games Operations
+    # =========================================================================
+
+    def insert_todays_games(self, games_list: list, sport: str) -> int:
+        """
+        Insert today's games with upsert logic.
+
+        Args:
+            games_list: List of game dicts with keys:
+                - game_date, commence_time, home_team, away_team
+                - spread (optional), spread_source (optional)
+            sport: Sport key (NFL, NBA, NCAAM)
+
+        Returns:
+            Number of rows affected
+        """
+        if not games_list:
+            return 0
+
+        from datetime import datetime
+
+        now = datetime.utcnow()
+        records = []
+        for game in games_list:
+            game_date = game["game_date"]
+            if hasattr(game_date, "strftime"):
+                game_date = game_date.strftime("%Y-%m-%d")
+
+            commence_time = game["commence_time"]
+            if hasattr(commence_time, "isoformat"):
+                commence_time = commence_time.isoformat()
+
+            records.append({
+                "sport": sport,
+                "game_date": game_date,
+                "commence_time": commence_time,
+                "home_team": game["home_team"],
+                "away_team": game["away_team"],
+                "spread": game.get("spread"),
+                "spread_source": game.get("spread_source"),
+                "created_at": now,
+                "updated_at": now,
+            })
+
+        return self._upsert(
+            todays_games, records,
+            constraint="uq_todays_game",
+            index_elements=["sport", "game_date", "home_team", "away_team"],
+            update_cols=["spread", "spread_source", "updated_at", "commence_time"],
+        )
+
+    def get_todays_games(self, sport: str = None, game_date: date = None) -> pd.DataFrame:
+        """
+        Get today's games from the database.
+
+        Args:
+            sport: Filter by sport (NFL, NBA, NCAAM), or None for all
+            game_date: Filter by date, defaults to today (EST)
+
+        Returns:
+            DataFrame with columns: sport, game_date, commence_time,
+            home_team, away_team, spread, spread_source, updated_at
+        """
+        from datetime import datetime, timedelta, timezone
+
+        # Default to today in EST
+        if game_date is None:
+            est = timezone(timedelta(hours=-5))
+            game_date = datetime.now(est).date()
+
+        query = select(todays_games).where(todays_games.c.game_date == game_date)
+
+        if sport:
+            query = query.where(todays_games.c.sport == sport)
+
+        query = query.order_by(todays_games.c.commence_time.asc())
+
+        with self.engine.connect() as conn:
+            return pd.read_sql(query, conn)
+
+    def clear_old_todays_games(self, before_date: date) -> int:
+        """
+        Delete games older than a given date (housekeeping).
+
+        Args:
+            before_date: Delete games with game_date before this date
+
+        Returns:
+            Number of rows deleted
+        """
+        stmt = delete(todays_games).where(todays_games.c.game_date < before_date)
+
+        with self.engine.begin() as conn:
+            result = conn.execute(stmt)
+            return result.rowcount
 
     # =========================================================================
     # Utility Methods
