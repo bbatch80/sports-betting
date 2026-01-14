@@ -248,7 +248,8 @@ def streak_continuation_analysis(
     sport: str,
     streak_length: int,
     streak_type: str,
-    handicap_range: tuple = (0, 15)
+    handicap_range: tuple = (0, 15),
+    _all_games_cache: dict = None
 ) -> pd.DataFrame:
     """
     Analyze what happens after ATS winning/losing streaks across all handicaps.
@@ -262,6 +263,7 @@ def streak_continuation_analysis(
         streak_length: The streak length to analyze (e.g., 3 for 3-game streak)
         streak_type: 'WIN' or 'LOSS'
         handicap_range: (min, max) handicap points to analyze
+        _all_games_cache: Optional cache dict to reuse games data across calls
 
     Returns:
         DataFrame with columns:
@@ -270,23 +272,42 @@ def streak_continuation_analysis(
         - total: Total situations
         - cover_pct: Percentage that covered
     """
-    from ..database import get_games, get_all_teams
+    from ..database import get_games
 
-    teams = get_all_teams(conn, sport)
+    # Fetch all games for this sport ONCE (not per-team)
+    if _all_games_cache is not None and sport in _all_games_cache:
+        all_games = _all_games_cache[sport]
+    else:
+        all_games = get_games(conn, sport=sport)
+        if _all_games_cache is not None:
+            _all_games_cache[sport] = all_games
+
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
 
     # Collect all "next game" spread results after the specified streak
     next_game_spread_results = []  # List of (spread_result, is_home) tuples
 
     for team in teams:
-        games = get_games(conn, sport=sport, team=team)
-        if len(games) < streak_length + 1:
+        # Filter games for this team in memory (no database query)
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < streak_length + 1:
             continue
 
-        games = games.sort_values('game_date').reset_index(drop=True)
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+
+        # Add is_home column
+        team_games['is_home'] = team_games['home_team'] == team
 
         # Calculate cover (at 0 handicap) for each game to identify streaks
         game_data = []
-        for _, row in games.iterrows():
+        for _, row in team_games.iterrows():
             is_home = row['is_home']
             spread_result = row['spread_result']
             # Cover at 0 handicap
@@ -351,6 +372,8 @@ def baseline_handicap_coverage(
     Calculate league-wide baseline cover rate at each handicap level.
 
     This gives the "expected" cover rate if there's no streak effect.
+    Calculates from BOTH home and away perspectives to match how
+    streak_continuation_analysis evaluates team performance.
 
     Args:
         conn: Database connection
@@ -368,16 +391,20 @@ def baseline_handicap_coverage(
 
     results = []
     for handicap in range(handicap_range[0], handicap_range[1] + 1):
-        # Calculate cover rate at this handicap (home perspective)
+        # Calculate cover rate from BOTH perspectives (matches streak analysis logic)
         # Home covers when spread_result + handicap > 0
-        covers = ((games['spread_result'] + handicap) > 0).sum()
-        total = len(games)
+        home_covers = ((games['spread_result'] + handicap) > 0).sum()
+        # Away covers when -(spread_result - handicap) > 0, i.e., spread_result < handicap
+        away_covers = ((games['spread_result'] - handicap) < 0).sum()
+
+        total_covers = home_covers + away_covers
+        total_situations = len(games) * 2  # Each game has 2 team perspectives
 
         results.append({
             'handicap': handicap,
-            'baseline_covers': int(covers),
-            'baseline_total': total,
-            'baseline_cover_pct': covers / total if total > 0 else 0
+            'baseline_covers': int(total_covers),
+            'baseline_total': total_situations,
+            'baseline_cover_pct': total_covers / total_situations if total_situations > 0 else 0
         })
 
     return pd.DataFrame(results)
@@ -393,21 +420,32 @@ def streak_summary_all_lengths(
 
     Returns count of situations for each streak length/type combination.
     """
-    from ..database import get_games, get_all_teams
+    from ..database import get_games
 
-    teams = get_all_teams(conn, sport)
+    # Fetch all games for this sport ONCE
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
     counts = {}
 
     for team in teams:
-        games = get_games(conn, sport=sport, team=team)
-        if len(games) < 3:
+        # Filter games for this team in memory
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < 3:
             continue
 
-        games = games.sort_values('game_date').reset_index(drop=True)
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+        team_games['is_home'] = team_games['home_team'] == team
 
         # Calculate cover at 0 handicap
         covers = []
-        for _, row in games.iterrows():
+        for _, row in team_games.iterrows():
             covered = (row['spread_result'] > 0) if row['is_home'] else (row['spread_result'] < 0)
             covers.append(covered)
 
@@ -457,21 +495,32 @@ def get_streak_situations_detail(
     Returns:
         DataFrame with each instance: team, date, opponent, spread, outcome
     """
-    from ..database import get_games, get_all_teams
+    from ..database import get_games
 
-    teams = get_all_teams(conn, sport)
+    # Fetch all games for this sport ONCE
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
     situations = []
 
     for team in teams:
-        games = get_games(conn, sport=sport, team=team)
-        if len(games) < streak_length + 1:
+        # Filter games for this team in memory
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < streak_length + 1:
             continue
 
-        games = games.sort_values('game_date').reset_index(drop=True)
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+        team_games['is_home'] = team_games['home_team'] == team
 
         # Calculate cover for each game
         game_data = []
-        for _, row in games.iterrows():
+        for _, row in team_games.iterrows():
             if row['is_home']:
                 covered = (row['spread_result'] + handicap) > 0
                 opponent = row['away_team']

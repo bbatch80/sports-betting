@@ -16,6 +16,8 @@ from datetime import date
 import pandas as pd
 import sqlite3
 
+from sqlalchemy import text
+
 from ..database import get_games
 
 
@@ -154,11 +156,19 @@ def compute_network_ratings(
             new_ratings[winner] += adjustment
             new_ratings[loser] -= adjustment
 
-        # Normalize to 0-1
-        min_r = min(new_ratings.values())
-        max_r = max(new_ratings.values())
-        if max_r > min_r:
-            new_ratings = {t: (r - min_r) / (max_r - min_r) for t, r in new_ratings.items()}
+        # Normalize using z-score + sigmoid (handles outliers better than min-max)
+        import math
+        # Filter out nan/inf values for mean/std calculation
+        valid_values = [v for v in new_ratings.values() if math.isfinite(v)]
+        if len(valid_values) > 1:
+            mean_r = sum(valid_values) / len(valid_values)
+            std_r = (sum((v - mean_r) ** 2 for v in valid_values) / len(valid_values)) ** 0.5
+            if std_r > 0:
+                new_ratings = {
+                    t: 1 / (1 + math.exp(-max(-10, min(10, (r - mean_r) / std_r))))  # Clamp z-score to prevent overflow
+                    if math.isfinite(r) else 0.5
+                    for t, r in new_ratings.items()
+                }
 
         # Check convergence
         max_change = max(abs(new_ratings[t] - ratings[t]) for t in teams)
@@ -348,16 +358,16 @@ def get_ratings_at_date(
     Returns:
         Dictionary mapping team name -> TeamRatings
     """
-    cursor = conn.cursor()
-    cursor.execute('''
+    query = text('''
         SELECT team, win_rating, ats_rating, market_gap,
                games_analyzed, win_rank, ats_rank
         FROM historical_ratings
-        WHERE sport = ? AND snapshot_date = ?
-    ''', (sport, game_date.strftime('%Y-%m-%d')))
+        WHERE sport = :sport AND snapshot_date = :game_date
+    ''')
+    result = conn.execute(query, {'sport': sport, 'game_date': game_date.strftime('%Y-%m-%d')})
 
     results = {}
-    for row in cursor.fetchall():
+    for row in result.fetchall():
         team = row[0]
         results[team] = TeamRatings(
             team=team,
@@ -401,21 +411,21 @@ def get_ratings_timeseries(
         SELECT snapshot_date, win_rating, ats_rating, market_gap,
                games_analyzed, win_rank, ats_rank
         FROM historical_ratings
-        WHERE sport = ? AND team = ?
+        WHERE sport = :sport AND team = :team
     '''
-    params = [sport, team]
+    params = {'sport': sport, 'team': team}
 
     if start_date:
-        query += ' AND snapshot_date >= ?'
-        params.append(start_date.strftime('%Y-%m-%d'))
+        query += ' AND snapshot_date >= :start_date'
+        params['start_date'] = start_date.strftime('%Y-%m-%d')
 
     if end_date:
-        query += ' AND snapshot_date <= ?'
-        params.append(end_date.strftime('%Y-%m-%d'))
+        query += ' AND snapshot_date <= :end_date'
+        params['end_date'] = end_date.strftime('%Y-%m-%d')
 
     query += ' ORDER BY snapshot_date ASC'
 
-    df = pd.read_sql_query(query, conn, params=params)
+    df = pd.read_sql_query(text(query), conn, params=params)
     df['snapshot_date'] = pd.to_datetime(df['snapshot_date'])
     return df
 

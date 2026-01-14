@@ -13,6 +13,8 @@ from datetime import date
 import pandas as pd
 import sqlite3
 
+from sqlalchemy import text
+
 from ..database import get_games
 
 
@@ -110,11 +112,11 @@ def get_games_with_ratings(conn: sqlite3.Connection, sport: str) -> pd.DataFrame
             ON g.sport = hr_away.sport
             AND g.game_date = hr_away.snapshot_date
             AND g.away_team = hr_away.team
-        WHERE g.sport = ?
+        WHERE g.sport = :sport
         ORDER BY g.game_date ASC
     """
 
-    df = pd.read_sql_query(query, conn, params=[sport])
+    df = pd.read_sql_query(text(query), conn, params={'sport': sport})
 
     # Filter to games where we have ratings for both teams
     df = df.dropna(subset=['home_win_rating', 'away_win_rating'])

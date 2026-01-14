@@ -106,6 +106,9 @@ def detect_patterns(
     """
     patterns = []
 
+    # Cache to store games per sport (avoids N+1 queries)
+    games_cache = {}
+
     for sport in ['NFL', 'NBA', 'NCAAM']:
         # Get baseline cover rates for this sport
         baseline = baseline_handicap_coverage(conn, sport, handicap_range)
@@ -116,7 +119,8 @@ def detect_patterns(
             for streak_type in ['WIN', 'LOSS']:
                 # Get handicap coverage after this streak
                 data = streak_continuation_analysis(
-                    conn, sport, streak_length, streak_type, handicap_range
+                    conn, sport, streak_length, streak_type, handicap_range,
+                    _all_games_cache=games_cache
                 )
 
                 if len(data) == 0:
@@ -165,21 +169,34 @@ def get_current_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]
         Dictionary mapping team name to streak info:
         {team: {'streak_length': N, 'streak_type': 'WIN'|'LOSS'}}
     """
-    teams = get_all_teams(conn, sport)
+    # Fetch all games for this sport ONCE
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return {}
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
     streaks = {}
 
     for team in teams:
-        games = get_games(conn, sport=sport, team=team)
-        if len(games) == 0:
+        # Filter games for this team in memory (no database query)
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) == 0:
             continue
 
         # Sort by date descending (most recent first)
-        games = games.sort_values('game_date', ascending=False)
+        team_games = team_games.sort_values('game_date', ascending=False)
+
+        # Add is_home column
+        team_games['is_home'] = team_games['home_team'] == team
 
         streak_length = 0
         streak_type = None
 
-        for _, row in games.iterrows():
+        for _, row in team_games.iterrows():
             is_home = row['is_home']
             # Cover at 0 handicap
             covered = (row['spread_result'] > 0) if is_home else (row['spread_result'] < 0)
