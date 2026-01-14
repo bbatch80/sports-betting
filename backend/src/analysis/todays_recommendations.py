@@ -260,7 +260,11 @@ def get_todays_games_from_db(conn: sqlite3.Connection, sport: str) -> List[Dict]
             })
         return games
     except Exception as e:
-        # Table might not exist yet or other error
+        # Rollback on error to reset connection state
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return []
 
 
@@ -287,6 +291,11 @@ def get_games_last_updated(conn: sqlite3.Connection) -> Optional[datetime]:
         row = result.fetchone()
         return row[0] if row and row[0] else None
     except Exception:
+        # Rollback on error to reset connection state
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return None
 
 
