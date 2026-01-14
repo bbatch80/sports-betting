@@ -28,13 +28,21 @@ LAMBDA_FUNCTIONS = {
         'runtime': 'python3.12',
         'schedule': 'cron(0 11 * * ? *)'  # 6:00 AM EST (11:00 UTC)
     },
+    'collect-todays-games': {
+        'description': 'Fetches today\'s scheduled games and spreads from Odds API',
+        'timeout': 300,  # 5 minutes
+        'memory': 256,   # MB
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': 'cron(30 11 * * ? *)'  # 6:30 AM EST (11:30 UTC)
+    },
     'generate-predictions': {
         'description': 'Generates betting opportunity predictions for today\'s games',
         'timeout': 600,  # 10 minutes
         'memory': 1024,  # MB (more for pandas operations)
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
-        'schedule': 'cron(30 11 * * ? *)'  # 6:30 AM EST (11:30 UTC)
+        'schedule': 'cron(45 11 * * ? *)'  # 6:45 AM EST (11:45 UTC) - after collect-todays-games
     },
     'evaluate-strategy-results': {
         'description': 'Evaluates yesterday\'s strategy predictions against actual results',
