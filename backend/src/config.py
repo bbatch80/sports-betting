@@ -135,8 +135,8 @@ class DatabaseConfig:
             return cls(
                 backend=DatabaseBackend.SQLITE,
                 url=f"sqlite:///{sqlite_path}",
-                pool_size=1,  # SQLite doesn't benefit from connection pools
-                max_overflow=0,
+                pool_size=5,  # Allow multiple connections for mixed old/new API usage
+                max_overflow=2,
             )
 
     @property

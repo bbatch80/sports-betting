@@ -188,6 +188,16 @@ class AnalyticsRepository:
                 else:
                     spread_result = None
 
+            # Calculate total_result if not present
+            total_result = row.get("total_result")
+            if total_result is None or pd.isna(total_result):
+                if (pd.notna(row.get("home_score")) and
+                    pd.notna(row.get("away_score")) and
+                    pd.notna(row.get("closing_total"))):
+                    total_result = (row["home_score"] + row["away_score"]) - row["closing_total"]
+                else:
+                    total_result = None
+
             game_date = row["game_date"]
             if hasattr(game_date, "strftime"):
                 game_date = game_date.strftime("%Y-%m-%d")
@@ -198,16 +208,18 @@ class AnalyticsRepository:
                 "home_team": row["home_team"],
                 "away_team": row["away_team"],
                 "closing_spread": row.get("closing_spread"),
+                "closing_total": row.get("closing_total"),
                 "home_score": int(row["home_score"]) if pd.notna(row.get("home_score")) else None,
                 "away_score": int(row["away_score"]) if pd.notna(row.get("away_score")) else None,
                 "spread_result": spread_result,
+                "total_result": total_result,
             })
 
         return self._upsert(
             games, records,
             constraint="uq_game",
             index_elements=["sport", "game_date", "home_team", "away_team"],
-            update_cols=["closing_spread", "home_score", "away_score", "spread_result"],
+            update_cols=["closing_spread", "closing_total", "home_score", "away_score", "spread_result", "total_result"],
         )
 
     def get_all_teams(self, sport: Optional[str] = None) -> List[str]:
@@ -415,6 +427,7 @@ class AnalyticsRepository:
             games_list: List of game dicts with keys:
                 - game_date, commence_time, home_team, away_team
                 - spread (optional), spread_source (optional)
+                - total (optional), total_source (optional)
             sport: Sport key (NFL, NBA, NCAAM)
 
         Returns:
@@ -444,6 +457,8 @@ class AnalyticsRepository:
                 "away_team": game["away_team"],
                 "spread": game.get("spread"),
                 "spread_source": game.get("spread_source"),
+                "total": game.get("total"),
+                "total_source": game.get("total_source"),
                 "created_at": now,
                 "updated_at": now,
             })
@@ -452,7 +467,7 @@ class AnalyticsRepository:
             todays_games, records,
             constraint="uq_todays_game",
             index_elements=["sport", "game_date", "home_team", "away_team"],
-            update_cols=["spread", "spread_source", "updated_at", "commence_time"],
+            update_cols=["spread", "spread_source", "total", "total_source", "updated_at", "commence_time"],
         )
 
     def get_todays_games(self, sport: str = None, game_date: date = None) -> pd.DataFrame:

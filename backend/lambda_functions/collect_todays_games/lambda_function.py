@@ -85,30 +85,69 @@ def make_api_request(endpoint: str, params: Dict[str, Any], api_key: str) -> Any
     return response.json()
 
 
-def extract_spread_from_game(game: Dict[str, Any]) -> tuple:
-    """Extract current spread from game data (DraftKings preferred)."""
+def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract current spread and total from game data (DraftKings preferred).
+
+    Returns:
+        dict with keys: spread, spread_source, total, total_source
+    """
     home_team = game.get('home_team', '')
     bookmakers = game.get('bookmakers', [])
 
-    # Prefer DraftKings
-    draftkings = None
-    fallback = None
+    result = {
+        'spread': None,
+        'spread_source': None,
+        'total': None,
+        'total_source': None
+    }
+
+    # Track fallback values for non-DraftKings bookmakers
+    fallback_spread = None
+    fallback_spread_source = None
+    fallback_total = None
+    fallback_total_source = None
 
     for bookmaker in bookmakers:
         is_dk = 'draftkings' in bookmaker.get('key', '').lower()
+        bookmaker_name = bookmaker.get('title', 'Unknown')
+
         for market in bookmaker.get('markets', []):
+            # Extract spread
             if market.get('key') == 'spreads':
                 for outcome in market.get('outcomes', []):
                     if outcome.get('name') == home_team:
                         spread = outcome.get('point')
                         if is_dk:
-                            return spread, 'DraftKings'
-                        elif fallback is None:
-                            fallback = (spread, bookmaker.get('title', 'Unknown'))
+                            result['spread'] = spread
+                            result['spread_source'] = 'DraftKings'
+                        elif fallback_spread is None:
+                            fallback_spread = spread
+                            fallback_spread_source = bookmaker_name
+                        break
 
-    if fallback:
-        return fallback
-    return None, None
+            # Extract total (Over/Under have same point value)
+            elif market.get('key') == 'totals':
+                for outcome in market.get('outcomes', []):
+                    if outcome.get('point') is not None:
+                        total = outcome.get('point')
+                        if is_dk:
+                            result['total'] = total
+                            result['total_source'] = 'DraftKings'
+                        elif fallback_total is None:
+                            fallback_total = total
+                            fallback_total_source = bookmaker_name
+                        break
+
+    # Use fallback values if DraftKings not found
+    if result['spread'] is None and fallback_spread is not None:
+        result['spread'] = fallback_spread
+        result['spread_source'] = fallback_spread_source
+    if result['total'] is None and fallback_total is not None:
+        result['total'] = fallback_total
+        result['total_source'] = fallback_total_source
+
+    return result
 
 
 def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
@@ -122,12 +161,16 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
         return 0
 
     upsert_sql = text("""
-        INSERT INTO todays_games (sport, game_date, commence_time, home_team, away_team, spread, spread_source, created_at, updated_at)
-        VALUES (:sport, :game_date, :commence_time, :home_team, :away_team, :spread, :spread_source, :created_at, :updated_at)
+        INSERT INTO todays_games (sport, game_date, commence_time, home_team, away_team,
+                                  spread, spread_source, total, total_source, created_at, updated_at)
+        VALUES (:sport, :game_date, :commence_time, :home_team, :away_team,
+                :spread, :spread_source, :total, :total_source, :created_at, :updated_at)
         ON CONFLICT (sport, game_date, home_team, away_team)
         DO UPDATE SET
             spread = EXCLUDED.spread,
             spread_source = EXCLUDED.spread_source,
+            total = EXCLUDED.total,
+            total_source = EXCLUDED.total_source,
             commence_time = EXCLUDED.commence_time,
             updated_at = EXCLUDED.updated_at
     """)
@@ -175,13 +218,13 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
 
     logger.info(f"Collecting {sport_key.upper()} games for {target_date_only}...")
 
-    # Get odds (includes today's scheduled games with spreads)
+    # Get odds (includes today's scheduled games with spreads and totals)
     time.sleep(API_RATE_LIMIT_DELAY)
     odds_response = make_api_request(
         endpoint=f"sports/{api_sport_key}/odds",
         params={
             'regions': ','.join(DEFAULT_REGIONS),
-            'markets': 'spreads',
+            'markets': 'spreads,totals',  # Request both markets
             'oddsFormat': 'american',
             'dateFormat': 'iso'
         },
@@ -204,7 +247,7 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
             if event_date_est == target_date_only:
                 home_team = game.get('home_team', '')
                 away_team = game.get('away_team', '')
-                spread, spread_source = extract_spread_from_game(game)
+                odds = extract_odds_from_game(game)
 
                 games_data.append({
                     'sport': sport_key.upper(),
@@ -212,8 +255,10 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
                     'commence_time': event_time.isoformat(),
                     'home_team': home_team,
                     'away_team': away_team,
-                    'spread': spread,
-                    'spread_source': spread_source,
+                    'spread': odds['spread'],
+                    'spread_source': odds['spread_source'],
+                    'total': odds['total'],
+                    'total_source': odds['total_source'],
                     'created_at': now,
                     'updated_at': now
                 })

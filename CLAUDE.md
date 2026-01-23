@@ -109,7 +109,7 @@ sports-betting/
 │   │       └── network_ratings.py
 │   ├── dashboard/
 │   │   └── app.py              # Streamlit analytics dashboard
-│   ├── lambda_functions/       # AWS Lambda (5 functions)
+│   ├── lambda_functions/       # AWS Lambda (6 functions)
 │   ├── scripts/                # Deployment & operations
 │   ├── migrations/             # DB migrations
 │   ├── notebooks/              # Jupyter analysis
@@ -211,6 +211,7 @@ sports-betting/
 |------|----------|---------|
 | 3:00 AM | evaluate_strategy_results | Match predictions to outcomes |
 | 6:00 AM | collect_yesterday_games | Get scores + closing spreads |
+| 6:15 AM | generate_historical_ratings | Compute daily rating snapshots |
 | 6:30 AM | generate_predictions | Create today's opportunities |
 | On-demand | predictions_api | Serve predictions to apps |
 | On-demand | results_api | Serve historical results |

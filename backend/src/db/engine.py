@@ -67,12 +67,13 @@ def get_engine(config: Optional[DatabaseConfig] = None) -> Engine:
         poolclass = NullPool
         pool_kwargs = {}
     elif config.is_sqlite:
-        # For SQLite: use StaticPool for single-connection scenarios
-        # or no special pooling for typical usage
+        # For SQLite: use QueuePool with small pool
+        # Size > 1 needed because dashboard mixes old (conn) and new (repository) patterns
         poolclass = QueuePool
         pool_kwargs = {
-            "pool_size": 1,
-            "max_overflow": 0,
+            "pool_size": 5,
+            "max_overflow": 2,
+            "pool_timeout": 30,
         }
     else:
         # For PostgreSQL (direct connection, not via proxy):

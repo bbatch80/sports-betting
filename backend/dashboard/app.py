@@ -11,6 +11,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Load environment variables from .env file (for DATABASE_URL, etc.)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).parent.parent / '.env')
+except ImportError:
+    pass
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -40,33 +47,13 @@ from src.analysis.aggregations import (
 )
 from src.analysis.insights import (
     detect_patterns,
-    find_opportunities,
     get_current_streaks,
-    get_pattern_summary,
-    get_opportunity_summary,
 )
 from src.analysis.network_ratings import (
     get_team_rankings,
     get_rankings_dataframe,
 )
-from src.analysis.backtest_ratings import (
-    get_games_with_ratings,
-    backtest_gap_strategy,
-    backtest_rank_strategy,
-    analyze_gap_thresholds,
-    generate_backtest_report,
-    get_game_by_game_results,
-    BREAKEVEN_WIN_RATE,
-)
-from src.analysis.tier_matchups import (
-    detect_tier_matchup_patterns,
-    detect_all_tier_matchup_patterns,
-    find_tier_matchup_opportunities,
-    get_tier_pattern_summary,
-    get_tier_opportunity_summary,
-    get_tier,
-    TIERS,
-)
+from src.analysis.tier_matchups import get_tier
 from src.analysis.todays_recommendations import (
     generate_recommendations,
     get_combined_confidence,
@@ -119,7 +106,7 @@ st.sidebar.title("📊 Analytics Dashboard")
 # Navigation
 page = st.sidebar.radio(
     "Navigation",
-    ["📋 Strategy Overview", "🎲 Today's Picks", "🏆 Power Rankings", "📈 Backtest Strategies", "Macro Trends", "Micro (Team) Analysis", "Streak Analysis", "Exploration", "Verification"]
+    ["🎲 Today's Picks", "🏆 Power Rankings", "📉 ATS Rating Trajectory", "📈 ATS Momentum", "🔥 Current Streaks", "Macro Trends", "Micro (Team) Analysis", "Streak Analysis", "Verification"]
 )
 
 st.sidebar.markdown("---")
@@ -625,147 +612,14 @@ def page_streak_analysis():
 
 
 # =============================================================================
-# Page: Strategy Overview
-# =============================================================================
-
-def page_matchup_opportunities():
-    st.title("📋 Strategy Overview")
-    st.markdown("""
-    **Real-time analysis results** showing which betting strategies are currently
-    profitable based on backtest results and streak pattern detection.
-    """)
-
-    # Sport selector
-    sport = st.selectbox("Select Sport", ["NBA", "NFL", "NCAAM"], key="strategy_sport")
-
-    # -------------------------
-    # Section 1: Backtest Strategies
-    # -------------------------
-    st.header("📊 Backtest Strategies")
-    st.caption("Rating-based strategies tested against historical data")
-
-    # Get backtest report for selected sport
-    @st.cache_data(ttl=600, show_spinner=False)
-    def get_backtest_data(_conn, sport):
-        from src.analysis.backtest_ratings import generate_backtest_report
-        return generate_backtest_report(_conn, sport)
-
-    with st.spinner("Running backtests..."):
-        report = get_backtest_data(conn, sport)
-
-    if 'error' not in report:
-        col1, col2 = st.columns(2)
-
-        # Gap Strategy Card
-        with col1:
-            st.subheader("🎯 Market Gap Strategy")
-            if report.get('best_gap_strategy'):
-                gap = report['best_gap_strategy']
-                is_profitable = gap['roi'] > 0
-                icon = "✅" if is_profitable else "⚠️"
-                st.markdown(f"**{icon} Threshold: {gap['threshold']:.2f}**")
-                st.metric("Win Rate", f"{gap['win_rate']:.1%}", delta=f"{gap['edge']:+.1%} edge")
-                st.metric("ROI", f"{gap['roi']:.1%}")
-                st.caption(f"{gap['bets']} total bets analyzed")
-            else:
-                st.info("No profitable gap threshold found")
-
-        # Rank Strategy Card
-        with col2:
-            st.subheader("🏆 Rank Strategy")
-            if report.get('best_rank_strategy'):
-                rank = report['best_rank_strategy']
-                is_profitable = rank['roi'] > 0
-                icon = "✅" if is_profitable else "⚠️"
-                st.markdown(f"**{icon} {rank['strategy_name']}**")
-                st.metric("Win Rate", f"{rank['win_rate']:.1%}", delta=f"{rank['edge']:+.1%} edge")
-                st.metric("ROI", f"{rank['roi']:.1%}")
-                st.caption(f"{rank['total_bets']} total bets analyzed")
-            else:
-                st.info("No profitable rank strategy found")
-
-        st.caption(f"Analysis period: {report['date_range']['start']} to {report['date_range']['end']} | {report['games_analyzed']} games")
-    else:
-        st.warning(f"No backtest data: {report.get('error', 'Unknown error')}")
-
-    st.markdown("---")
-
-    # -------------------------
-    # Section 2: Streak Patterns
-    # -------------------------
-    st.header("🔥 Streak Patterns")
-    st.caption("Statistically significant edges from streak analysis")
-
-    @st.cache_data(ttl=600, show_spinner=False)
-    def get_streak_patterns(_conn):
-        from src.analysis.insights import detect_patterns
-        return detect_patterns(_conn, min_sample=30, min_edge=0.05)
-
-    with st.spinner("Detecting streak patterns..."):
-        patterns = get_streak_patterns(conn)
-
-    # Filter to selected sport
-    sport_patterns = [p for p in patterns if p.sport == sport]
-
-    if sport_patterns:
-        # Separate ride vs fade patterns
-        ride_patterns = [p for p in sport_patterns if p.pattern_type == 'streak_ride']
-        fade_patterns = [p for p in sport_patterns if p.pattern_type == 'streak_fade']
-
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.subheader("📈 Ride Patterns")
-            st.caption("Bet ON teams after these streaks")
-            if ride_patterns:
-                for p in sorted(ride_patterns, key=lambda x: x.edge, reverse=True)[:5]:
-                    conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}[p.confidence]
-                    st.markdown(f"**{conf_icon} {p.streak_length}+ {p.streak_type.lower()} streak at +{p.handicap}**")
-                    st.caption(f"{p.cover_rate:.1%} cover vs {p.baseline_rate:.1%} baseline = **{p.edge:+.1%} edge** | {p.sample_size} samples")
-                if len(ride_patterns) > 5:
-                    with st.expander(f"Show all {len(ride_patterns)} ride patterns"):
-                        for p in sorted(ride_patterns, key=lambda x: x.edge, reverse=True):
-                            conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}[p.confidence]
-                            st.markdown(f"**{conf_icon} {p.streak_length}+ {p.streak_type.lower()} streak at +{p.handicap}**")
-                            st.caption(f"{p.cover_rate:.1%} cover vs {p.baseline_rate:.1%} baseline = **{p.edge:+.1%} edge** | {p.sample_size} samples")
-            else:
-                st.info("No ride patterns detected")
-
-        with col2:
-            st.subheader("📉 Fade Patterns")
-            st.caption("Bet AGAINST teams after these streaks")
-            if fade_patterns:
-                for p in sorted(fade_patterns, key=lambda x: abs(x.edge), reverse=True)[:5]:
-                    conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}[p.confidence]
-                    st.markdown(f"**{conf_icon} {p.streak_length}+ {p.streak_type.lower()} streak at +{p.handicap}**")
-                    st.caption(f"{p.cover_rate:.1%} cover vs {p.baseline_rate:.1%} baseline = **{p.edge:+.1%} edge** | {p.sample_size} samples")
-                if len(fade_patterns) > 5:
-                    with st.expander(f"Show all {len(fade_patterns)} fade patterns"):
-                        for p in sorted(fade_patterns, key=lambda x: abs(x.edge), reverse=True):
-                            conf_icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}[p.confidence]
-                            st.markdown(f"**{conf_icon} {p.streak_length}+ {p.streak_type.lower()} streak at +{p.handicap}**")
-                            st.caption(f"{p.cover_rate:.1%} cover vs {p.baseline_rate:.1%} baseline = **{p.edge:+.1%} edge** | {p.sample_size} samples")
-            else:
-                st.info("No fade patterns detected")
-
-        # Summary stats
-        st.markdown("---")
-        total_patterns = len(sport_patterns)
-        high_conf = len([p for p in sport_patterns if p.confidence == 'high'])
-        st.caption(f"**{total_patterns} patterns detected** for {sport} ({high_conf} high confidence)")
-    else:
-        st.info(f"No significant streak patterns found for {sport}")
-
-
-# =============================================================================
 # Page: Today's Picks (Primary Navigation)
 # =============================================================================
 
 def page_todays_picks():
     st.title("🎲 Today's Picks")
     st.markdown("""
-    **Today's Picks** combines streak and tier matchup insights for games scheduled today.
-    Recommendations are generated by cross-referencing today's games against detected patterns.
+    **Today's Picks** shows streak-based betting recommendations for games scheduled today.
+    Recommendations are generated by cross-referencing today's games against detected streak patterns.
     """)
 
     # Detect streak patterns (needed for recommendations)
@@ -792,40 +646,34 @@ def page_todays_picks():
 
     sport_to_use = picks_sport if picks_sport != "All" else "All"
 
-    # Get tier patterns
-    @st.cache_data(ttl=600, show_spinner=False)
-    def get_cached_tier_patterns(_conn, sport_key):
-        if sport_key == "All":
-            return detect_all_tier_matchup_patterns(_conn, min_sample=30, min_edge=0.05)
-        return detect_tier_matchup_patterns(_conn, sport_key, min_sample=30, min_edge=0.05)
-
-    tier_patterns = get_cached_tier_patterns(conn, sport_to_use)
-
     # Generate recommendations (games fetched from database)
+    # Note: Passing empty list for tier_patterns - only streak-based recommendations
     with st.spinner("Analyzing today's games..."):
         game_recommendations = generate_recommendations(
             conn,
             sport_to_use,
             patterns,
-            tier_patterns,
+            [],  # No tier matchup patterns - streak-based only
         )
 
-    if not game_recommendations:
-        st.info(f"No games scheduled today for {picks_sport}.")
-    else:
-        # Count games with recommendations
-        games_with_recs = [g for g in game_recommendations if g.recommendations]
-        st.markdown(f"**Found {len(game_recommendations)} games today** ({len(games_with_recs)} with betting edges)")
+    # Filter to only games with detected edges
+    games_with_edges = [g for g in game_recommendations if g.recommendations]
 
-        # Sort by max edge descending (games with no recommendations go to bottom)
+    if not games_with_edges:
+        if not game_recommendations:
+            st.info(f"No games scheduled today for {picks_sport}.")
+        else:
+            st.info(f"No betting edges detected in {len(game_recommendations)} games today.")
+    else:
+        st.markdown(f"**{len(games_with_edges)} games with betting edges** (out of {len(game_recommendations)} total)")
+
+        # Sort by max edge descending
         def get_max_edge(game):
-            if not game.recommendations:
-                return -1  # No recommendations, sort to bottom
             return max(rec.edge for rec in game.recommendations)
 
-        game_recommendations_sorted = sorted(game_recommendations, key=get_max_edge, reverse=True)
+        games_sorted = sorted(games_with_edges, key=get_max_edge, reverse=True)
 
-        for game in game_recommendations_sorted:
+        for game in games_sorted:
             # Game card
             with st.container():
                 # Header with team names and ratings
@@ -856,30 +704,24 @@ def page_todays_picks():
                     spread_display = f"+{game.spread}" if game.spread > 0 else str(game.spread)
                     st.caption(f"Spread: {game.home_team} {spread_display} ({game.spread_source or 'Unknown'})")
 
-                # Recommendations
-                if game.recommendations:
-                    # Group by bet_on team
-                    teams_recommended = {}
-                    for rec in game.recommendations:
-                        if rec.bet_on not in teams_recommended:
-                            teams_recommended[rec.bet_on] = []
-                        teams_recommended[rec.bet_on].append(rec)
+                # Recommendations - group by bet_on team
+                teams_recommended = {}
+                for rec in game.recommendations:
+                    if rec.bet_on not in teams_recommended:
+                        teams_recommended[rec.bet_on] = []
+                    teams_recommended[rec.bet_on].append(rec)
 
-                    for bet_team, recs in teams_recommended.items():
-                        combined_conf = get_combined_confidence(recs)
-                        conf_color = "🟢" if combined_conf == "HIGH" else ("🟡" if combined_conf == "MEDIUM" else "⚪")
+                for bet_team, recs in teams_recommended.items():
+                    combined_conf = get_combined_confidence(recs)
+                    conf_color = "🟢" if combined_conf == "HIGH" else ("🟡" if combined_conf == "MEDIUM" else "⚪")
 
-                        st.markdown(f"#### {conf_color} BET ON: {bet_team}")
+                    st.markdown(f"#### {conf_color} BET ON: {bet_team}")
 
-                        for rec in recs:
-                            source_icon = "📈" if rec.source == "streak" else "🎯"
-                            st.markdown(f"- {source_icon} **{rec.source.replace('_', ' ').title()}**: {rec.rationale}")
+                    for rec in recs:
+                        source_icon = "📈" if rec.source == "streak" else "🎯"
+                        st.markdown(f"- {source_icon} **{rec.source.replace('_', ' ').title()}**: {rec.rationale}")
 
-                        st.caption(f"Combined Confidence: {combined_conf}")
-
-                else:
-                    st.markdown("⚪ **NO EDGE DETECTED**")
-                    st.caption("Neither team matches profitable patterns")
+                    st.caption(f"Combined Confidence: {combined_conf}")
 
                 # Streak info in expander
                 with st.expander("Team Details"):
@@ -904,577 +746,6 @@ def page_todays_picks():
                             st.write("No current streak")
 
                 st.markdown("---")
-
-    # Current team streaks (collapsible)
-    with st.expander("📊 All Current Team Streaks"):
-        for sport in ['NFL', 'NBA', 'NCAAM']:
-            streaks = get_current_streaks(conn, sport)
-            if streaks:
-                st.markdown(f"**{sport}**")
-                streak_data = []
-                for team, info in sorted(streaks.items(), key=lambda x: -x[1]['streak_length']):
-                    streak_data.append({
-                        'Team': team,
-                        'Streak': f"{info['streak_length']} {info['streak_type']}",
-                        'Length': info['streak_length'],
-                        'Type': info['streak_type']
-                    })
-                streak_df = pd.DataFrame(streak_data)
-                st.dataframe(streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
-                st.markdown("")
-
-
-# =============================================================================
-# Page: Opportunities (Dynamic Insight Engine)
-# =============================================================================
-
-def page_opportunities():
-    st.title("🎯 Today's Opportunities")
-    st.markdown("""
-    **Dynamic pattern detection** identifies statistically significant betting edges
-    and matches them against current team states to surface actionable opportunities.
-    """)
-
-    # Settings in expander
-    with st.expander("⚙️ Detection Settings", expanded=False):
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            min_sample = st.slider(
-                "Min Sample Size",
-                5, 100, 30,
-                help="Minimum streak situations required. Must have at least 5 occurrences to be considered actionable."
-            )
-        with col2:
-            min_edge = st.slider("Min Edge %", 1, 15, 5, help="Minimum edge vs baseline to include")
-        with col3:
-            min_confidence = st.selectbox("Min Confidence", ["low", "medium", "high"], index=0)
-
-        st.caption("⚠️ Patterns with fewer than 30 samples should be treated with caution. Sample size is shown for each opportunity.")
-
-    # Detect patterns (cached)
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def cached_detect_patterns(_conn, min_sample, min_edge):
-        return detect_patterns(_conn, min_sample=min_sample, min_edge=min_edge/100)
-
-    with st.spinner("Detecting patterns..."):
-        patterns = cached_detect_patterns(conn, min_sample, min_edge)
-
-    # Find current opportunities
-    with st.spinner("Scanning for opportunities..."):
-        opportunities = find_opportunities(conn, patterns, min_confidence=min_confidence)
-
-    # Summary metrics
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Patterns Detected", len(patterns))
-    col2.metric("Current Opportunities", len(opportunities))
-    col3.metric(
-        "Strongest Edge",
-        f"{max([p.edge for p in patterns], key=abs)*100:+.1f}%" if patterns else "N/A"
-    )
-
-    st.markdown("---")
-
-    # Tabs for opportunities vs patterns
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Streak Opportunities", "🔍 Streak Patterns", "🎯 Tier Matchup Strategies", "🎲 Today's Picks"])
-
-    # ----- Tab 1: Current Opportunities -----
-    with tab1:
-        if not opportunities:
-            st.info("No opportunities match current team streaks and pattern criteria.")
-        else:
-            # Filter by sport if desired
-            opp_sports = list(set([o.sport for o in opportunities]))
-            if len(opp_sports) > 1:
-                sport_filter = st.multiselect("Filter by Sport", opp_sports, default=opp_sports)
-                filtered_opps = [o for o in opportunities if o.sport in sport_filter]
-            else:
-                filtered_opps = opportunities
-
-            st.markdown(f"**Showing {len(filtered_opps)} opportunities** (sorted by edge strength)")
-
-            for i, opp in enumerate(filtered_opps[:15]):  # Top 15
-                # Color and icon based on recommendation
-                if opp.recommendation == "FADE":
-                    icon = "🔴"
-                    color = "#e74c3c"
-                    action = f"Bet AGAINST {opp.team}"
-                else:
-                    icon = "🟢"
-                    color = "#2ecc71"
-                    action = f"Bet ON {opp.team}"
-
-                with st.container():
-                    col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
-
-                    with col1:
-                        st.markdown(f"### {icon} {opp.recommendation} {opp.team}")
-                        st.caption(f"{opp.sport} | {opp.current_streak}-game ATS {opp.streak_type.lower()} streak")
-
-                    with col2:
-                        st.markdown(f"**Action:** {action}")
-                        st.caption(f"Pattern: {opp.pattern.streak_length}+ {opp.pattern.streak_type.lower()} → {opp.pattern.pattern_type.replace('_', ' ')}")
-
-                    with col3:
-                        st.metric("Edge", f"{opp.edge_pct:.1%}")
-
-                    with col4:
-                        st.metric("Sample", opp.pattern.sample_size)
-                        st.caption(opp.pattern.confidence.title())
-
-                    # Expandable details
-                    with st.expander(f"Pattern Details for {opp.team}"):
-                        detail_col1, detail_col2 = st.columns(2)
-
-                        with detail_col1:
-                            st.markdown("**Pattern Statistics:**")
-                            st.write(f"- After {opp.pattern.streak_length}+ game {opp.pattern.streak_type.lower()} streaks in {opp.pattern.sport}")
-                            st.write(f"- Handicap: +{opp.pattern.handicap} points")
-                            st.write(f"- Sample size: {opp.pattern.sample_size} observations")
-
-                        with detail_col2:
-                            st.markdown("**Edge Calculation:**")
-                            st.write(f"- Cover rate after streak: **{opp.pattern.cover_rate:.1%}**")
-                            st.write(f"- League baseline: {opp.pattern.baseline_rate:.1%}")
-                            st.write(f"- Edge: **{opp.pattern.edge*100:+.1f}%**")
-
-                        st.markdown("---")
-                        st.markdown(f"""
-                        **Interpretation:** Teams on {opp.pattern.streak_length}+ game ATS {opp.pattern.streak_type.lower()} streaks
-                        in {opp.pattern.sport} cover at {opp.pattern.cover_rate:.1%}, which is
-                        {"below" if opp.pattern.edge < 0 else "above"} the league baseline of {opp.pattern.baseline_rate:.1%}.
-                        This suggests {"fading" if opp.pattern.edge < 0 else "riding"} these teams.
-                        """)
-
-                st.markdown("")  # Spacing
-
-    # ----- Tab 2: All Detected Patterns -----
-    with tab2:
-        if not patterns:
-            st.info("No patterns meet the minimum criteria. Try lowering the thresholds.")
-        else:
-            st.markdown(f"**Found {len(patterns)} significant patterns** (sorted by edge strength)")
-
-            # Filter controls
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                pattern_sport = st.multiselect(
-                    "Sport",
-                    ['NFL', 'NBA', 'NCAAM'],
-                    default=['NFL', 'NBA', 'NCAAM'],
-                    key="pattern_sport"
-                )
-            with col2:
-                pattern_type_filter = st.multiselect(
-                    "Pattern Type",
-                    ['streak_fade', 'streak_ride'],
-                    default=['streak_fade', 'streak_ride'],
-                    key="pattern_type"
-                )
-            with col3:
-                pattern_confidence = st.multiselect(
-                    "Confidence",
-                    ['high', 'medium', 'low'],
-                    default=['high', 'medium', 'low'],
-                    key="pattern_conf"
-                )
-
-            filtered_patterns = [
-                p for p in patterns
-                if p.sport in pattern_sport
-                and p.pattern_type in pattern_type_filter
-                and p.confidence in pattern_confidence
-            ]
-
-            if filtered_patterns:
-                summary_df = get_pattern_summary(filtered_patterns)
-                st.dataframe(summary_df, hide_index=True, use_container_width=True)
-
-                # Visualization
-                st.markdown("---")
-                st.subheader("Pattern Distribution")
-
-                chart_col1, chart_col2 = st.columns(2)
-
-                with chart_col1:
-                    # By sport
-                    sport_counts = {}
-                    for p in filtered_patterns:
-                        sport_counts[p.sport] = sport_counts.get(p.sport, 0) + 1
-
-                    fig = px.pie(
-                        values=list(sport_counts.values()),
-                        names=list(sport_counts.keys()),
-                        title="Patterns by Sport"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                with chart_col2:
-                    # Edge distribution
-                    edges = [p.edge * 100 for p in filtered_patterns]
-                    fig = px.histogram(
-                        x=edges,
-                        nbins=20,
-                        title="Edge Distribution (%)",
-                        labels={'x': 'Edge vs Baseline (%)'}
-                    )
-                    fig.add_vline(x=0, line_dash="dash", line_color="gray")
-                    st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.warning("No patterns match the filters")
-
-    # ----- Tab 3: Tier Matchup Strategies -----
-    with tab3:
-        st.markdown("""
-        **Tier Matchup Analysis** identifies profitable patterns when teams from different
-        rating tiers play each other at specific handicaps.
-
-        *Example: When TOP tier plays BOTTOM tier with +11 handicap, the lower-rated team covers 85% of the time.*
-        """)
-
-        # Settings
-        tier_col1, tier_col2, tier_col3 = st.columns(3)
-        with tier_col1:
-            tier_min_sample = st.slider(
-                "Min Sample Size",
-                10, 100, 30,
-                key="tier_min_sample",
-                help="Minimum games required for a pattern"
-            )
-        with tier_col2:
-            tier_min_edge = st.slider(
-                "Min Edge %",
-                1, 20, 5,
-                key="tier_min_edge",
-                help="Minimum edge vs baseline to include"
-            )
-        with tier_col3:
-            tier_sport_filter = st.selectbox(
-                "Sport",
-                ["All", "NFL", "NBA", "NCAAM"],
-                key="tier_sport"
-            )
-
-        # Detect tier matchup patterns (cached)
-        @st.cache_data(ttl=3600, show_spinner=False)
-        def cached_tier_patterns(_conn, sport, min_sample, min_edge):
-            if sport == "All":
-                return detect_all_tier_matchup_patterns(_conn, min_sample=min_sample, min_edge=min_edge/100)
-            else:
-                return detect_tier_matchup_patterns(_conn, sport, min_sample=min_sample, min_edge=min_edge/100)
-
-        with st.spinner("Analyzing tier matchup patterns..."):
-            tier_patterns = cached_tier_patterns(
-                conn,
-                tier_sport_filter,
-                tier_min_sample,
-                tier_min_edge
-            )
-
-        # Summary metrics
-        tier_m1, tier_m2, tier_m3, tier_m4 = st.columns(4)
-        tier_m1.metric("Patterns Found", len(tier_patterns))
-        high_conf_patterns = [p for p in tier_patterns if p.confidence == 'high']
-        tier_m2.metric("High Confidence", len(high_conf_patterns))
-        if tier_patterns:
-            avg_edge = sum(p.edge for p in tier_patterns) / len(tier_patterns)
-            tier_m3.metric("Avg Edge", f"{avg_edge:.1%}")
-            best_pattern = max(tier_patterns, key=lambda p: p.edge)
-            tier_m4.metric("Best Edge", f"{best_pattern.edge:.1%}")
-
-        st.markdown("---")
-
-        if not tier_patterns:
-            st.info("No tier matchup patterns meet the minimum criteria. Try lowering the thresholds.")
-        else:
-            # Sub-tabs for patterns vs opportunities
-            tier_tab1, tier_tab2 = st.tabs(["📊 Detected Patterns", "🎯 Current Opportunities"])
-
-            with tier_tab1:
-                st.markdown(f"**{len(tier_patterns)} patterns found** (sorted by edge)")
-
-                # Filters
-                tier_filter_col1, tier_filter_col2 = st.columns(2)
-                with tier_filter_col1:
-                    tier_higher_filter = st.multiselect(
-                        "Higher Tier",
-                        TIERS,
-                        default=TIERS,
-                        key="tier_higher"
-                    )
-                with tier_filter_col2:
-                    tier_lower_filter = st.multiselect(
-                        "Lower Tier",
-                        TIERS,
-                        default=TIERS,
-                        key="tier_lower"
-                    )
-
-                # Filter patterns
-                filtered_tier_patterns = [
-                    p for p in tier_patterns
-                    if p.higher_tier in tier_higher_filter
-                    and p.lower_tier in tier_lower_filter
-                ]
-
-                if filtered_tier_patterns:
-                    # Show patterns table
-                    tier_summary_df = get_tier_pattern_summary(filtered_tier_patterns[:50])  # Top 50
-                    st.dataframe(tier_summary_df, hide_index=True, use_container_width=True)
-
-                    # Visualization
-                    st.markdown("---")
-                    st.subheader("Pattern Insights")
-
-                    viz_col1, viz_col2 = st.columns(2)
-
-                    with viz_col1:
-                        # Patterns by matchup type
-                        matchup_counts = {}
-                        for p in filtered_tier_patterns:
-                            key = f"{p.higher_tier} vs {p.lower_tier}"
-                            matchup_counts[key] = matchup_counts.get(key, 0) + 1
-
-                        # Sort by count
-                        sorted_matchups = sorted(matchup_counts.items(), key=lambda x: -x[1])[:10]
-
-                        fig = go.Figure(go.Bar(
-                            y=[m[0] for m in sorted_matchups],
-                            x=[m[1] for m in sorted_matchups],
-                            orientation='h',
-                            marker_color='#3498db'
-                        ))
-                        fig.update_layout(
-                            title="Patterns by Tier Matchup",
-                            xaxis_title="Number of Patterns",
-                            yaxis=dict(autorange="reversed"),
-                            height=350
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    with viz_col2:
-                        # Edge by bet direction
-                        higher_patterns = [p for p in filtered_tier_patterns if p.bet_on == 'HIGHER']
-                        lower_patterns = [p for p in filtered_tier_patterns if p.bet_on == 'LOWER']
-
-                        fig = go.Figure()
-                        fig.add_trace(go.Box(
-                            y=[p.edge * 100 for p in higher_patterns],
-                            name=f"Bet HIGHER ({len(higher_patterns)})",
-                            marker_color='#2ecc71'
-                        ))
-                        fig.add_trace(go.Box(
-                            y=[p.edge * 100 for p in lower_patterns],
-                            name=f"Bet LOWER ({len(lower_patterns)})",
-                            marker_color='#e74c3c'
-                        ))
-                        fig.update_layout(
-                            title="Edge Distribution by Bet Direction",
-                            yaxis_title="Edge (%)",
-                            height=350
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    # Show top individual patterns
-                    st.markdown("---")
-                    st.subheader("Top 5 High-Confidence Patterns")
-
-                    top_patterns = [p for p in filtered_tier_patterns if p.confidence == 'high'][:5]
-                    if not top_patterns:
-                        top_patterns = filtered_tier_patterns[:5]
-
-                    for i, p in enumerate(top_patterns):
-                        with st.container():
-                            icon = "🟢" if p.bet_on == "HIGHER" else "🔴"
-                            st.markdown(f"### {icon} {p.sport}: {p.higher_tier} vs {p.lower_tier} (+{p.handicap})")
-
-                            p_col1, p_col2, p_col3, p_col4 = st.columns(4)
-                            p_col1.metric("Bet On", p.bet_on)
-                            p_col2.metric("Cover Rate", f"{p.cover_rate:.1%}")
-                            p_col3.metric("Edge", f"{p.edge:+.1%}")
-                            p_col4.metric("Sample", p.sample_size)
-
-                            st.caption(f"Record: {p.wins}-{p.losses} | ROI: {p.roi:+.1%} | Baseline: {p.baseline_rate:.1%} | Confidence: {p.confidence.title()}")
-                            st.markdown("---")
-                else:
-                    st.warning("No patterns match the tier filters")
-
-            with tier_tab2:
-                st.markdown("""
-                **Current Opportunities** show team pairs currently in tier combinations
-                with detected profitable patterns. When these teams play each other,
-                the pattern suggests a betting edge.
-                """)
-
-                # Find opportunities
-                tier_opps = find_tier_matchup_opportunities(conn, tier_patterns, min_confidence='medium')
-
-                if not tier_opps:
-                    st.info("No current tier matchup opportunities. This means no teams currently in matching tier combinations or no high-confidence patterns detected.")
-                else:
-                    # Filter by sport if desired
-                    opp_sports = list(set([o.sport for o in tier_opps]))
-                    if len(opp_sports) > 1:
-                        tier_opp_sport = st.multiselect(
-                            "Filter by Sport",
-                            opp_sports,
-                            default=opp_sports,
-                            key="tier_opp_sport"
-                        )
-                        filtered_tier_opps = [o for o in tier_opps if o.sport in tier_opp_sport]
-                    else:
-                        filtered_tier_opps = tier_opps
-
-                    st.markdown(f"**{len(filtered_tier_opps)} potential matchups** (when these teams play each other)")
-
-                    # Show opportunities
-                    for i, opp in enumerate(filtered_tier_opps[:20]):
-                        icon = "🟢" if opp.pattern.bet_on == "HIGHER" else "🔴"
-
-                        with st.container():
-                            opp_col1, opp_col2, opp_col3 = st.columns([3, 2, 1])
-
-                            with opp_col1:
-                                st.markdown(f"### {icon} {opp.higher_rated_team} vs {opp.lower_rated_team}")
-                                st.caption(f"{opp.sport} | {opp.higher_tier} ({opp.higher_rating:.2f}) vs {opp.lower_tier} ({opp.lower_rating:.2f})")
-
-                            with opp_col2:
-                                st.markdown(f"**{opp.recommendation}**")
-                                st.caption(f"Pattern: +{opp.pattern.handicap} handicap | {opp.pattern.sample_size} games")
-
-                            with opp_col3:
-                                st.metric("Edge", f"{opp.edge_pct:.1%}")
-
-                        if i < len(filtered_tier_opps) - 1:
-                            st.markdown("---")
-
-    # ----- Tab 4: Today's Picks -----
-    with tab4:
-        st.markdown("""
-        **Today's Picks** combines streak and tier matchup insights for games scheduled today.
-        Recommendations are generated by cross-referencing today's games against detected patterns.
-        """)
-
-        # Check for API key
-        api_key = get_api_key()
-
-        if not api_key:
-            st.warning("⚠️ Odds API key not configured. Set `ODDS_API_KEY` environment variable or configure AWS Secrets Manager.")
-            st.info("The API key is required to fetch today's game schedule from The Odds API.")
-        else:
-            # Sport filter for today's picks
-            picks_sport = st.selectbox(
-                "Sport",
-                ["All", "NFL", "NBA", "NCAAM"],
-                key="todays_picks_sport"
-            )
-
-            sport_to_use = picks_sport if picks_sport != "All" else "All"
-
-            # Get tier patterns for all sports or selected sport
-            @st.cache_data(ttl=600, show_spinner=False)
-            def get_cached_tier_patterns(_conn, sport_key):
-                if sport_key == "All":
-                    return detect_all_tier_matchup_patterns(_conn, min_sample=30, min_edge=0.05)
-                return detect_tier_matchup_patterns(_conn, sport_key, min_sample=30, min_edge=0.05)
-
-            tier_patterns_for_picks = get_cached_tier_patterns(conn, sport_to_use)
-
-            # Generate recommendations
-            with st.spinner("Fetching today's games and analyzing..."):
-                game_recommendations = generate_recommendations(
-                    conn,
-                    sport_to_use,
-                    patterns,  # Streak patterns from earlier in the page
-                    tier_patterns_for_picks,
-                    api_key
-                )
-
-            if not game_recommendations:
-                st.info(f"No games scheduled today for {picks_sport}.")
-            else:
-                # Count games with recommendations
-                games_with_recs = [g for g in game_recommendations if g.recommendations]
-                st.markdown(f"**Found {len(game_recommendations)} games today** ({len(games_with_recs)} with betting edges)")
-
-                for game in game_recommendations:
-                    # Game card
-                    with st.container():
-                        # Header with team names and ratings
-                        st.markdown(f"### {game.away_team} @ {game.home_team}")
-
-                        # Team ratings row - prominent display
-                        rating_col1, rating_col2, rating_col3 = st.columns([2, 2, 1])
-
-                        with rating_col1:
-                            # Away team rating
-                            if game.away_ats_rating is not None and game.away_tier:
-                                st.markdown(f"**🚗 {game.away_team}:** {game.away_tier} ({game.away_ats_rating:.3f})")
-                            else:
-                                st.markdown(f"**🚗 {game.away_team}:** No rating")
-
-                        with rating_col2:
-                            # Home team rating
-                            if game.home_ats_rating is not None and game.home_tier:
-                                st.markdown(f"**🏠 {game.home_team}:** {game.home_tier} ({game.home_ats_rating:.3f})")
-                            else:
-                                st.markdown(f"**🏠 {game.home_team}:** No rating")
-
-                        with rating_col3:
-                            st.caption(f"{game.sport} | {game.game_time}")
-
-                        # Spread info
-                        if game.spread is not None:
-                            spread_display = f"+{game.spread}" if game.spread > 0 else str(game.spread)
-                            st.caption(f"Spread: {game.home_team} {spread_display} ({game.spread_source or 'Unknown'})")
-
-                        # Recommendations
-                        if game.recommendations:
-                            # Group by bet_on team
-                            teams_recommended = {}
-                            for rec in game.recommendations:
-                                if rec.bet_on not in teams_recommended:
-                                    teams_recommended[rec.bet_on] = []
-                                teams_recommended[rec.bet_on].append(rec)
-
-                            for bet_team, recs in teams_recommended.items():
-                                combined_conf = get_combined_confidence(recs)
-                                conf_color = "🟢" if combined_conf == "HIGH" else ("🟡" if combined_conf == "MEDIUM" else "⚪")
-
-                                st.markdown(f"#### {conf_color} BET ON: {bet_team}")
-
-                                for rec in recs:
-                                    source_icon = "📈" if rec.source == "streak" else "🎯"
-                                    st.markdown(f"- {source_icon} **{rec.source.replace('_', ' ').title()}**: {rec.rationale}")
-
-                                st.caption(f"Combined Confidence: {combined_conf}")
-
-                        else:
-                            st.markdown("⚪ **NO EDGE DETECTED**")
-                            st.caption("Neither team matches profitable patterns")
-
-                        # Streak info in expander
-                        with st.expander("Team Details"):
-                            detail_col1, detail_col2 = st.columns(2)
-
-                            with detail_col1:
-                                st.markdown(f"**{game.home_team}** (Home)")
-                                if game.home_ats_rating is not None:
-                                    st.write(f"ATS Rating: {game.home_ats_rating:.3f} ({game.home_tier})")
-                                if game.home_streak:
-                                    st.write(f"Streak: {game.home_streak[0]}-game ATS {game.home_streak[1].lower()}")
-                                else:
-                                    st.write("No current streak")
-
-                            with detail_col2:
-                                st.markdown(f"**{game.away_team}** (Away)")
-                                if game.away_ats_rating is not None:
-                                    st.write(f"ATS Rating: {game.away_ats_rating:.3f} ({game.away_tier})")
-                                if game.away_streak:
-                                    st.write(f"Streak: {game.away_streak[0]}-game ATS {game.away_streak[1].lower()}")
-                                else:
-                                    st.write("No current streak")
-
-                    st.markdown("---")
 
     # Current team streaks (collapsible)
     with st.expander("📊 All Current Team Streaks"):
@@ -1694,419 +965,422 @@ def page_power_rankings():
         """)
 
 
+
+
+
+
+def calculate_team_slopes(df: pd.DataFrame, team: str) -> dict:
+    """Calculate ATS rating slopes for various time windows using linear regression."""
+    from scipy.stats import linregress
+
+    team_data = df[df['team'] == team].sort_values('snapshot_date')
+    if team_data.empty:
+        return {'1w': None, '2w': None, '3w': None}
+
+    latest_date = pd.to_datetime(team_data['snapshot_date']).max()
+
+    slopes = {}
+    for label, days in [('1w', 7), ('2w', 14), ('3w', 21)]:
+        cutoff = latest_date - pd.Timedelta(days=days)
+        window = team_data[pd.to_datetime(team_data['snapshot_date']) >= cutoff]
+
+        if len(window) >= 3:
+            x = (pd.to_datetime(window['snapshot_date']) - pd.to_datetime(window['snapshot_date']).min()).dt.days
+            y = window['ats_rating']
+            slope, _, _, _, _ = linregress(x, y)
+            slopes[label] = slope
+        else:
+            slopes[label] = None
+
+    return slopes
+
+
 # =============================================================================
-# Page: Backtest Strategies
+# Page: ATS Rating Trajectory
 # =============================================================================
 
-def page_backtest():
-    st.title("📈 Backtest Strategies")
-    st.markdown(f"**Rating-based strategy backtesting** for **{selected_sport}**. Breakeven at -110 odds: **52.4%**")
+def page_ats_trajectory():
+    """Visualize how team ATS ratings evolve over time."""
+    st.title("ATS Rating Trajectory")
+    st.markdown("Track how team ATS ratings change throughout the season. Do TOP teams stay TOP?")
 
-    games_df = get_games_with_ratings(conn, selected_sport)
-    if len(games_df) == 0:
-        st.warning(f"No games with historical ratings found. Run `python scripts/generate_historical_ratings.py` first.")
+    # Controls
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="trajectory_sport")
+
+    # Query historical ratings
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT snapshot_date, team, ats_rating, ats_rank
+        FROM historical_ratings
+        WHERE sport = :sport
+        ORDER BY snapshot_date, team
+    """)
+
+    try:
+        result = conn.execute(query, {'sport': page_sport})
+        rows = result.fetchall()
+    except Exception as e:
+        st.error(f"Error loading historical ratings: {e}")
         return
 
-    # Get live baseline cover rates for all handicap levels (0-15) for dynamic color scaling
-    baseline_df = baseline_handicap_coverage(conn, selected_sport, handicap_range=(0, 15))
+    if not rows:
+        st.warning(f"No historical ratings found for {page_sport}")
+        return
 
-    # Helper: assign rating tier
-    def get_tier(rating):
-        if rating >= 0.7: return '1-Top (.7+)'
-        if rating >= 0.55: return '2-High (.55-.7)'
-        if rating >= 0.45: return '3-Mid (.45-.55)'
-        if rating >= 0.3: return '4-Low (.3-.45)'
-        return '5-Bottom (<.3)'
+    # Build DataFrame
+    df = pd.DataFrame(rows, columns=['snapshot_date', 'team', 'ats_rating', 'ats_rank'])
+    df['snapshot_date'] = pd.to_datetime(df['snapshot_date']).dt.date
 
-    # Add tier columns
-    games_df['home_tier'] = games_df['home_ats_rating'].apply(get_tier)
-    games_df['away_tier'] = games_df['away_ats_rating'].apply(get_tier)
+    # Get list of teams
+    teams = sorted(df['team'].unique())
 
-    # Determine higher/lower rated team info
-    games_df['higher_team'] = games_df.apply(
-        lambda r: r['home_team'] if r['home_ats_rating'] > r['away_ats_rating'] else r['away_team'], axis=1)
-    games_df['lower_team'] = games_df.apply(
-        lambda r: r['away_team'] if r['home_ats_rating'] > r['away_ats_rating'] else r['home_team'], axis=1)
-    games_df['higher_rating'] = games_df[['home_ats_rating', 'away_ats_rating']].max(axis=1)
-    games_df['lower_rating'] = games_df[['home_ats_rating', 'away_ats_rating']].min(axis=1)
-    games_df['higher_tier'] = games_df['higher_rating'].apply(get_tier)
-    games_df['lower_tier'] = games_df['lower_rating'].apply(get_tier)
+    st.markdown("---")
 
-    # Determine if higher-rated team is home (needed for handicap calculations)
-    games_df['higher_is_home'] = games_df['home_ats_rating'] > games_df['away_ats_rating']
+    # Team selector
+    col1, col2 = st.columns([2, 2])
+    with col1:
+        view_mode = st.radio("View Mode", ["Selected Teams", "All Teams (by current tier)"], horizontal=True)
 
-    # Did the team with higher ATS rating cover? (at handicap 0)
-    # This replaces higher_gap_covered for consistency with tier-based analysis
-    games_df['higher_ats_covered'] = (
-        (games_df['higher_is_home'] & (games_df['spread_result'] > 0)) |
-        (~games_df['higher_is_home'] & (games_df['spread_result'] < 0))
-    )
-
-    # Header metrics
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Games Analyzed", len(games_df))
-    col2.metric("Avg Rating Diff", f"{(games_df['higher_rating'] - games_df['lower_rating']).mean():.3f}")
-    col3.metric("Higher Rated Covers", f"{games_df['higher_ats_covered'].mean():.1%}")
-
-    tab1, tab2, tab3, tab4 = st.tabs(["Tier Matchups", "Tier + Handicap", "Gap Threshold", "Matchup Details"])
-
-    # Tab 1: Rating Tier Matrix
-    with tab1:
-        st.subheader("Rating Tier Matchup Matrix")
-        st.markdown("When the **higher-rated** team plays a **lower-rated** team, does the higher-rated team cover?")
-
-        # Build matrix
-        matrix_data = games_df.groupby(['higher_tier', 'lower_tier']).agg(
-            games=('higher_ats_covered', 'count'),
-            wins=('higher_ats_covered', 'sum')
-        ).reset_index()
-        matrix_data['win_rate'] = matrix_data['wins'] / matrix_data['games']
-        matrix_data['losses'] = matrix_data['games'] - matrix_data['wins']
-
-        # Create pivot for heatmap
-        tier_order = ['1-Top (.7+)', '2-High (.55-.7)', '3-Mid (.45-.55)', '4-Low (.3-.45)', '5-Bottom (<.3)']
-        pivot_wr = matrix_data.pivot(index='higher_tier', columns='lower_tier', values='win_rate')
-        pivot_n = matrix_data.pivot(index='higher_tier', columns='lower_tier', values='games')
-
-        # Reindex to ensure order
-        pivot_wr = pivot_wr.reindex(index=tier_order, columns=tier_order)
-        pivot_n = pivot_n.reindex(index=tier_order, columns=tier_order)
-
-        # Create heatmap with annotations
-        annotations = []
-        for i, row_tier in enumerate(tier_order):
-            for j, col_tier in enumerate(tier_order):
-                wr = pivot_wr.loc[row_tier, col_tier] if pd.notna(pivot_wr.loc[row_tier, col_tier]) else None
-                n = pivot_n.loc[row_tier, col_tier] if pd.notna(pivot_n.loc[row_tier, col_tier]) else None
-                if wr is not None and n is not None:
-                    annotations.append(f"{wr:.0%}<br>({int(n)})")
-                else:
-                    annotations.append("")
-
-        # Get live baseline at handicap=0 for color scale centering
-        baseline_at_0 = baseline_df[baseline_df['handicap'] == 0]['baseline_cover_pct'].iloc[0] * 100
-        # Dynamic zmin/zmax centered on baseline (±25 percentage points)
-        zmin_0 = max(0, baseline_at_0 - 25)
-        zmax_0 = min(100, baseline_at_0 + 25)
-
-        fig = go.Figure(data=go.Heatmap(
-            z=pivot_wr.values * 100,
-            x=[t.split('-')[1] for t in tier_order],  # Clean labels
-            y=[t.split('-')[1] for t in tier_order],
-            text=[[annotations[i*5+j] for j in range(5)] for i in range(5)],
-            texttemplate="%{text}",
-            colorscale=[[0, '#e74c3c'], [0.5, '#f5f5f5'], [1, '#2ecc71']],
-            zmid=baseline_at_0,
-            zmin=zmin_0, zmax=zmax_0,
-            hovertemplate="Higher: %{y}<br>vs Lower: %{x}<br>Win Rate: %{z:.1f}%<extra></extra>"
-        ))
-        fig.update_layout(
-            title="Higher-Rated Team Cover Rate by Tier Matchup",
-            xaxis_title="Lower-Rated Team Tier",
-            yaxis_title="Higher-Rated Team Tier",
-            height=500
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(f"🎯 League baseline at 0pt handicap: {baseline_at_0:.2f}% | Green = above baseline | Red = below baseline")
-
-        # Tier selector for drill-down
-        st.markdown("---")
-        st.subheader("Drill Down by Tier")
-        col1, col2 = st.columns(2)
-        with col1:
-            selected_higher = st.selectbox("Higher-Rated Tier", tier_order, index=0)
+    if view_mode == "Selected Teams":
         with col2:
-            selected_lower = st.selectbox("Lower-Rated Tier", tier_order, index=4)
-
-        # Filter and show summary
-        filtered = games_df[(games_df['higher_tier'] == selected_higher) & (games_df['lower_tier'] == selected_lower)]
-        if len(filtered) > 0:
-            wins = filtered['higher_ats_covered'].sum()
-            losses = len(filtered) - wins
-            wr = wins / len(filtered)
-            roi = (wins * 0.91 - losses) / len(filtered)
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Games", len(filtered))
-            col2.metric("Record", f"{wins}-{losses}")
-            col3.metric("Win Rate", f"{wr:.1%}", delta=f"{(wr - BREAKEVEN_WIN_RATE)*100:+.1f}%")
-            col4.metric("ROI", f"{roi:+.1%}")
-
-            # Store selection for Tab 3
-            st.session_state['backtest_filter'] = {
-                'higher_tier': selected_higher,
-                'lower_tier': selected_lower
-            }
-        else:
-            st.info("No games match this tier combination.")
-
-    # Tab 2: Tier Matchups with Handicap
-    with tab2:
-        st.subheader("Rating Tier Matrix with Handicap")
-        st.markdown("Analyze cover rates when giving **extra points** to either the higher-rated or lower-rated team.")
-
-        # Controls
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            handicap_pts = st.slider("Handicap Points", 0, 15, 0, key="tier_handicap")
-        with col2:
-            handicap_to = st.radio(
-                "Give handicap to:",
-                ["Higher-Rated Team", "Lower-Rated Team"],
-                horizontal=True,
-                key="handicap_recipient"
+            selected_teams = st.multiselect(
+                "Select Teams to Compare",
+                teams,
+                default=teams[:5] if len(teams) >= 5 else teams,
+                key="trajectory_teams"
             )
 
-        # Calculate coverage with handicap for BOTH sides
-        # Higher-rated team with +N handicap:
-        #   If HOME: cover if spread_result > -N
-        #   If AWAY: cover if spread_result < N
-        games_df['higher_covers_with_handicap'] = (
-            (games_df['higher_is_home'] & (games_df['spread_result'] > -handicap_pts)) |
-            (~games_df['higher_is_home'] & (games_df['spread_result'] < handicap_pts))
-        )
-        # Lower-rated team with +N handicap:
-        #   If HOME (higher is away): cover if spread_result > -N
-        #   If AWAY (higher is home): cover if spread_result < N
-        games_df['lower_covers_with_handicap'] = (
-            (~games_df['higher_is_home'] & (games_df['spread_result'] > -handicap_pts)) |
-            (games_df['higher_is_home'] & (games_df['spread_result'] < handicap_pts))
-        )
+        if not selected_teams:
+            st.info("Select at least one team to view their rating trajectory.")
+            return
 
-        # Show summary stats for BOTH sides
-        st.markdown("---")
-        st.subheader(f"Overall Coverage at +{handicap_pts} Handicap")
+        plot_df = df[df['team'].isin(selected_teams)]
 
-        total_games = len(games_df)
-        higher_wins = games_df['higher_covers_with_handicap'].sum()
-        lower_wins = games_df['lower_covers_with_handicap'].sum()
-        higher_wr = higher_wins / total_games if total_games > 0 else 0
-        lower_wr = lower_wins / total_games if total_games > 0 else 0
+        # Line chart
+        fig = go.Figure()
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Games", total_games)
-        col2.metric(
-            f"Higher-Rated +{handicap_pts}",
-            f"{higher_wr:.1%}",
-            delta=f"{(higher_wr - BREAKEVEN_WIN_RATE)*100:+.1f}%"
-        )
-        col3.metric(
-            f"Lower-Rated +{handicap_pts}",
-            f"{lower_wr:.1%}",
-            delta=f"{(lower_wr - BREAKEVEN_WIN_RATE)*100:+.1f}%"
-        )
-
-        # Select which coverage column to use for the heatmap
-        coverage_col = 'higher_covers_with_handicap' if handicap_to == "Higher-Rated Team" else 'lower_covers_with_handicap'
-
-        # Build matrix with handicap
-        matrix_hc = games_df.groupby(['higher_tier', 'lower_tier']).agg(
-            games=(coverage_col, 'count'),
-            wins=(coverage_col, 'sum')
-        ).reset_index()
-        matrix_hc['win_rate'] = matrix_hc['wins'] / matrix_hc['games']
-
-        # Create pivot for heatmap
-        tier_order = ['1-Top (.7+)', '2-High (.55-.7)', '3-Mid (.45-.55)', '4-Low (.3-.45)', '5-Bottom (<.3)']
-        pivot_wr_hc = matrix_hc.pivot(index='higher_tier', columns='lower_tier', values='win_rate')
-        pivot_n_hc = matrix_hc.pivot(index='higher_tier', columns='lower_tier', values='games')
-
-        # Reindex to ensure order
-        pivot_wr_hc = pivot_wr_hc.reindex(index=tier_order, columns=tier_order)
-        pivot_n_hc = pivot_n_hc.reindex(index=tier_order, columns=tier_order)
-
-        # Create heatmap with annotations
-        annotations_hc = []
-        for i, row_tier in enumerate(tier_order):
-            for j, col_tier in enumerate(tier_order):
-                wr = pivot_wr_hc.loc[row_tier, col_tier] if pd.notna(pivot_wr_hc.loc[row_tier, col_tier]) else None
-                n = pivot_n_hc.loc[row_tier, col_tier] if pd.notna(pivot_n_hc.loc[row_tier, col_tier]) else None
-                if wr is not None and n is not None:
-                    annotations_hc.append(f"{wr:.0%}<br>({int(n)})")
-                else:
-                    annotations_hc.append("")
-
-        team_label = "Higher-Rated" if handicap_to == "Higher-Rated Team" else "Lower-Rated"
-
-        # Get live baseline at selected handicap for color scale centering
-        baseline_at_handicap = baseline_df[baseline_df['handicap'] == handicap_pts]['baseline_cover_pct'].iloc[0] * 100
-        # Dynamic zmin/zmax centered on baseline (±25 percentage points)
-        zmin_hc = max(0, baseline_at_handicap - 25)
-        zmax_hc = min(100, baseline_at_handicap + 25)
-
-        fig_hc = go.Figure(data=go.Heatmap(
-            z=pivot_wr_hc.values * 100,
-            x=[t.split('-')[1] for t in tier_order],
-            y=[t.split('-')[1] for t in tier_order],
-            text=[[annotations_hc[i*5+j] for j in range(5)] for i in range(5)],
-            texttemplate="%{text}",
-            colorscale=[[0, '#e74c3c'], [0.5, '#f5f5f5'], [1, '#2ecc71']],
-            zmid=baseline_at_handicap,
-            zmin=zmin_hc, zmax=zmax_hc,
-            hovertemplate="Higher Tier: %{y}<br>vs Lower Tier: %{x}<br>Cover Rate: %{z:.1f}%<extra></extra>"
-        ))
-        fig_hc.update_layout(
-            title=f"{team_label} Team Cover Rate (+{handicap_pts} pts)",
-            xaxis_title="Lower-Rated Team Tier",
-            yaxis_title="Higher-Rated Team Tier",
-            height=500
-        )
-        st.plotly_chart(fig_hc, use_container_width=True)
-        st.caption(f"🎯 League baseline at +{handicap_pts}pt handicap: {baseline_at_handicap:.2f}% | Green = above baseline | Red = below baseline")
-
-        # Summary table
-        st.markdown("---")
-        st.subheader(f"Summary: {team_label} +{handicap_pts} by Tier Matchup")
-        summary_hc = matrix_hc.copy()
-        summary_hc['tier_matchup'] = summary_hc['higher_tier'].str.split('-').str[1] + ' vs ' + summary_hc['lower_tier'].str.split('-').str[1]
-        summary_hc['Cover Rate'] = summary_hc['win_rate'].apply(lambda x: f"{x:.1%}")
-        summary_hc['losses'] = summary_hc['games'] - summary_hc['wins']
-        summary_hc['Record'] = summary_hc.apply(lambda r: f"{int(r['wins'])}-{int(r['losses'])}", axis=1)
-        summary_hc['ROI'] = summary_hc.apply(lambda r: f"{((r['wins'] * 0.91 - r['losses']) / r['games']):+.1%}" if r['games'] > 0 else "N/A", axis=1)
-        summary_hc = summary_hc.sort_values('win_rate', ascending=False)
-        st.dataframe(
-            summary_hc[['tier_matchup', 'games', 'Record', 'Cover Rate', 'ROI']].rename(columns={'tier_matchup': 'Matchup', 'games': 'Games'}),
-            hide_index=True
-        )
-
-    # Tab 3: Gap Threshold Analysis
-    with tab3:
-        st.subheader("Gap Threshold Analysis")
-        bet_direction = st.selectbox(
-            "Bet Direction", ["higher_gap", "lower_gap"],
-            format_func=lambda x: "Bet on Higher Gap Team" if x == "higher_gap" else "Fade Higher Gap Team"
-        )
-
-        threshold_df = analyze_gap_thresholds(games_df, bet_on=bet_direction)
-
-        if len(threshold_df) > 0:
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(go.Bar(
-                name='Win Rate', x=threshold_df['threshold'], y=threshold_df['win_rate'] * 100,
-                marker_color=['#2ecc71' if wr > BREAKEVEN_WIN_RATE else '#e74c3c' for wr in threshold_df['win_rate']],
-                text=threshold_df['win_rate'].apply(lambda x: f'{x:.1%}'), textposition='outside'
-            ), secondary_y=False)
+        for team in selected_teams:
+            team_data = plot_df[plot_df['team'] == team].sort_values('snapshot_date')
             fig.add_trace(go.Scatter(
-                name='ROI', x=threshold_df['threshold'], y=threshold_df['roi'] * 100,
-                mode='lines+markers', line=dict(color='#3498db', width=3)
-            ), secondary_y=True)
-            fig.add_hline(y=BREAKEVEN_WIN_RATE * 100, line_dash="dash", line_color="gray")
-            fig.update_layout(title=f"Win Rate & ROI by Gap Threshold ({selected_sport})",
-                              xaxis_title="Gap Threshold", height=450)
-            fig.update_yaxes(title_text="Win Rate (%)", range=[40, 80], secondary_y=False)
-            fig.update_yaxes(title_text="ROI (%)", secondary_y=True)
-            st.plotly_chart(fig, use_container_width=True)
+                x=team_data['snapshot_date'],
+                y=team_data['ats_rating'],
+                mode='lines',
+                name=team,
+                hovertemplate=f"{team}<br>Date: %{{x}}<br>ATS Rating: %{{y:.3f}}<extra></extra>"
+            ))
 
-            display_df = threshold_df.copy()
-            display_df['Win Rate'] = display_df['win_rate'].apply(lambda x: f"{x:.1%}")
-            display_df['ROI'] = display_df['roi'].apply(lambda x: f"{x:+.1%}")
-            st.dataframe(display_df[['threshold', 'total_bets', 'wins', 'losses', 'Win Rate', 'ROI']], hide_index=True)
+        # Add tier boundary lines
+        fig.add_hline(y=0.70, line_dash="dash", line_color="green", annotation_text="TOP (0.70)")
+        fig.add_hline(y=0.55, line_dash="dash", line_color="blue", annotation_text="HIGH (0.55)")
+        fig.add_hline(y=0.45, line_dash="dash", line_color="gray", annotation_text="MID (0.45)")
+        fig.add_hline(y=0.30, line_dash="dash", line_color="orange", annotation_text="LOW (0.30)")
 
-    # Tab 4: Matchup Details
-    with tab4:
-        st.subheader("Matchup Details")
+        fig.update_layout(
+            title=f"{page_sport} ATS Rating Over Time",
+            xaxis_title="Date",
+            yaxis_title="ATS Rating",
+            yaxis=dict(range=[0, 1]),
+            height=500,
+            legend=dict(orientation="h", yanchor="bottom", y=-0.3)
+        )
 
-        # Get filter from session state or use defaults
-        filter_info = st.session_state.get('backtest_filter', {})
-        higher_t = filter_info.get('higher_tier', '1-Top (.7+)')
-        lower_t = filter_info.get('lower_tier', '5-Bottom (<.3)')
+        st.plotly_chart(fig, width='stretch')
 
-        st.markdown(f"**Showing:** {higher_t.split('-')[1]} vs {lower_t.split('-')[1]}")
-        st.caption("Select tiers in the 'Tier Matchups' tab to change filter")
+    else:
+        # Show all teams grouped by current tier
+        latest_date = df['snapshot_date'].max()
+        latest_ratings = df[df['snapshot_date'] == latest_date].copy()
+        latest_ratings['tier'] = latest_ratings['ats_rating'].apply(get_tier)
 
-        filtered = games_df[(games_df['higher_tier'] == higher_t) & (games_df['lower_tier'] == lower_t)].copy()
-        filtered = filtered.sort_values('game_date', ascending=False)
+        selected_tier = st.selectbox("Filter by Current Tier", ['TOP', 'HIGH', 'MID', 'LOW', 'BOTTOM'], key="trajectory_tier")
 
-        if len(filtered) > 0:
-            wins = filtered['higher_ats_covered'].sum()
-            wr = wins / len(filtered)
-            col1, col2 = st.columns(2)
-            col1.metric("Win Rate", f"{wr:.1%}")
-            col2.metric("Edge vs Breakeven", f"{(wr - BREAKEVEN_WIN_RATE)*100:+.1f}%")
+        tier_teams = latest_ratings[latest_ratings['tier'] == selected_tier]['team'].tolist()
 
-            # Build display table
-            display_df = filtered[['game_date', 'higher_team', 'higher_rating', 'lower_team', 'lower_rating',
-                                   'closing_spread', 'higher_ats_covered']].copy()
-            display_df.columns = ['Date', 'Higher Rated', 'H.Rtg', 'Lower Rated', 'L.Rtg', 'Spread', 'Covered']
-            display_df['H.Rtg'] = display_df['H.Rtg'].apply(lambda x: f"{x:.3f}")
-            display_df['L.Rtg'] = display_df['L.Rtg'].apply(lambda x: f"{x:.3f}")
-            display_df['Result'] = display_df['Covered'].apply(lambda x: '✅' if x else '❌')
-            st.dataframe(display_df[['Date', 'Higher Rated', 'H.Rtg', 'Lower Rated', 'L.Rtg', 'Spread', 'Result']],
-                         hide_index=True, use_container_width=True)
-        else:
-            st.info("No games match the selected tier combination.")
+        if not tier_teams:
+            st.info(f"No teams currently in {selected_tier} tier")
+            return
 
+        st.caption(f"{len(tier_teams)} teams currently in {selected_tier} tier")
 
-# =============================================================================
-# Page: Exploration
-# =============================================================================
+        plot_df = df[df['team'].isin(tier_teams)]
 
-def page_exploration():
-    st.title("Custom Exploration")
-    st.markdown("Build custom queries with flexible filters")
+        fig = go.Figure()
 
-    # Filters
-    col1, col2, col3 = st.columns(3)
+        for team in tier_teams:
+            team_data = plot_df[plot_df['team'] == team].sort_values('snapshot_date')
+            fig.add_trace(go.Scatter(
+                x=team_data['snapshot_date'],
+                y=team_data['ats_rating'],
+                mode='lines',
+                name=team,
+                opacity=0.7,
+                hovertemplate=f"{team}<br>Date: %{{x}}<br>ATS Rating: %{{y:.3f}}<extra></extra>"
+            ))
+
+        # Add tier boundary lines
+        fig.add_hline(y=0.70, line_dash="dash", line_color="green", annotation_text="TOP")
+        fig.add_hline(y=0.55, line_dash="dash", line_color="blue", annotation_text="HIGH")
+        fig.add_hline(y=0.45, line_dash="dash", line_color="gray", annotation_text="MID")
+        fig.add_hline(y=0.30, line_dash="dash", line_color="orange", annotation_text="LOW")
+
+        fig.update_layout(
+            title=f"{page_sport} ATS Rating Trajectory - Current {selected_tier} Tier Teams",
+            xaxis_title="Date",
+            yaxis_title="ATS Rating",
+            yaxis=dict(range=[0, 1]),
+            height=500,
+            showlegend=True if len(tier_teams) <= 15 else False
+        )
+
+        st.plotly_chart(fig, width='stretch')
+
+    # Summary stats
+    st.subheader("Rating Stability Analysis")
+
+    # Calculate volatility (std dev) for each team
+    volatility = df.groupby('team')['ats_rating'].agg(['std', 'mean', 'min', 'max']).reset_index()
+    volatility.columns = ['Team', 'Volatility (Std)', 'Mean Rating', 'Min Rating', 'Max Rating']
+    volatility['Range'] = volatility['Max Rating'] - volatility['Min Rating']
+    volatility = volatility.sort_values('Volatility (Std)', ascending=False)
+
+    col1, col2 = st.columns(2)
 
     with col1:
-        perspective = st.selectbox("Perspective", ["home", "away"])
-        handicap = st.slider("Handicap Points", 0, 15, 0)
+        st.markdown("**Most Volatile Teams** (highest std dev)")
+        top_volatile = volatility.head(10).copy()
+        top_volatile['Volatility (Std)'] = top_volatile['Volatility (Std)'].apply(lambda x: f"{x:.3f}")
+        top_volatile['Mean Rating'] = top_volatile['Mean Rating'].apply(lambda x: f"{x:.3f}")
+        top_volatile['Range'] = top_volatile['Range'].apply(lambda x: f"{x:.3f}")
+        st.dataframe(top_volatile[['Team', 'Volatility (Std)', 'Mean Rating', 'Range']], hide_index=True, use_container_width=True)
 
     with col2:
-        min_spread = st.number_input("Min Spread", value=-50.0, step=0.5)
-        max_spread = st.number_input("Max Spread", value=50.0, step=0.5)
+        st.markdown("**Most Stable Teams** (lowest std dev)")
+        bottom_volatile = volatility.tail(10).sort_values('Volatility (Std)').copy()
+        bottom_volatile['Volatility (Std)'] = bottom_volatile['Volatility (Std)'].apply(lambda x: f"{x:.3f}")
+        bottom_volatile['Mean Rating'] = bottom_volatile['Mean Rating'].apply(lambda x: f"{x:.3f}")
+        bottom_volatile['Range'] = bottom_volatile['Range'].apply(lambda x: f"{x:.3f}")
+        st.dataframe(bottom_volatile[['Team', 'Volatility (Std)', 'Mean Rating', 'Range']], hide_index=True, use_container_width=True)
 
-    with col3:
-        date_range = get_date_range(conn, selected_sport)
-        if date_range[0] and date_range[1]:
-            from datetime import datetime
-            start = datetime.strptime(date_range[0], '%Y-%m-%d').date() if isinstance(date_range[0], str) else date_range[0]
-            end = datetime.strptime(date_range[1], '%Y-%m-%d').date() if isinstance(date_range[1], str) else date_range[1]
-        else:
-            from datetime import date
-            start = date(2024, 1, 1)
-            end = date.today()
 
-    # Load filtered games
-    games = get_games(
-        conn,
-        sport=selected_sport,
-        min_spread=min_spread if min_spread > -50 else None,
-        max_spread=max_spread if max_spread < 50 else None
-    )
+# =============================================================================
+# Page: ATS Momentum (Slope Analysis)
+# =============================================================================
 
-    if len(games) == 0:
-        st.warning("No games match the filters")
+def page_ats_momentum():
+    """Track team ATS rating momentum - which teams are trending up or down."""
+    st.title("📈 ATS Rating Momentum")
+    st.caption("Track which teams are trending up or down against the spread")
+
+    # Controls
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="momentum_sport")
+
+    # Query historical ratings
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT snapshot_date, team, ats_rating, ats_rank
+        FROM historical_ratings
+        WHERE sport = :sport
+        ORDER BY team, snapshot_date
+    """)
+
+    try:
+        result = conn.execute(query, {'sport': page_sport})
+        rows = result.fetchall()
+    except Exception as e:
+        st.error(f"Error loading historical ratings: {e}")
         return
 
-    # Calculate metrics
-    rate = ats_cover_rate(games, handicap=handicap, perspective=perspective)
-    w, l, p = ats_record(games, handicap=handicap, perspective=perspective)
-    margin = spread_margin_avg(games, perspective=perspective)
+    if not rows:
+        st.warning(f"No historical ratings found for {page_sport}")
+        return
 
-    # Display results
+    # Build DataFrame
+    df = pd.DataFrame(rows, columns=['snapshot_date', 'team', 'ats_rating', 'ats_rank'])
+
+    # Get unique teams
+    teams = sorted(df['team'].unique())
+
+    # Calculate slopes for each team
+    results = []
+    for team in teams:
+        team_data = df[df['team'] == team].sort_values('snapshot_date')
+        if team_data.empty:
+            continue
+
+        current_rating = team_data['ats_rating'].iloc[-1]
+        current_rank = int(team_data['ats_rank'].iloc[-1]) if pd.notna(team_data['ats_rank'].iloc[-1]) else None
+        slopes = calculate_team_slopes(df, team)
+
+        results.append({
+            'Team': team,
+            'ATS Rating': current_rating,
+            'Rank': current_rank,
+            '1W Slope': slopes['1w'],
+            '2W Slope': slopes['2w'],
+            '3W Slope': slopes['3w'],
+        })
+
+    results_df = pd.DataFrame(results)
+
+    if results_df.empty:
+        st.warning("No data available to calculate momentum")
+        return
+
+    # Add direction indicators
+    def direction_indicator(slope):
+        if slope is None:
+            return '—'
+        if slope > 0.005:
+            return '↑↑'  # Strong rise
+        elif slope > 0.001:
+            return '↑'   # Rising
+        elif slope < -0.005:
+            return '↓↓'  # Strong fall
+        elif slope < -0.001:
+            return '↓'   # Falling
+        return '→'       # Flat
+
+    results_df['1W Dir'] = results_df['1W Slope'].apply(direction_indicator)
+    results_df['2W Dir'] = results_df['2W Slope'].apply(direction_indicator)
+    results_df['3W Dir'] = results_df['3W Slope'].apply(direction_indicator)
+
+    # Calculate Momentum Change (1W slope - 3W slope)
+    # Positive = accelerating (recent trend stronger), Negative = decelerating
+    def calc_momentum_change(row):
+        if pd.isna(row['1W Slope']) or pd.isna(row['3W Slope']):
+            return None
+        return row['1W Slope'] - row['3W Slope']
+
+    results_df['Momentum'] = results_df.apply(calc_momentum_change, axis=1)
+
+    def momentum_indicator(val):
+        if val is None:
+            return '—'
+        if val > 0.003:
+            return '🚀'  # Strong acceleration
+        elif val > 0.001:
+            return '⬆️'   # Accelerating
+        elif val < -0.003:
+            return '🔻'  # Strong deceleration
+        elif val < -0.001:
+            return '⬇️'   # Decelerating
+        return '➡️'       # Steady
+
+    results_df['Accel'] = results_df['Momentum'].apply(momentum_indicator)
+
     st.markdown("---")
-    st.subheader("Results")
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Games Analyzed", len(games))
-    col2.metric("ATS Record", f"{w}-{l}-{p}")
-    col3.metric("Cover Rate", f"{rate:.1%}")
-    col4.metric("Avg Margin", f"{margin:+.1f}")
+    # Display controls
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        sort_by = st.selectbox("Sort by", ['ATS Rating', '1W Slope', '2W Slope', '3W Slope', 'Momentum', 'Rank'])
+    with col2:
+        ascending = st.checkbox("Ascending", value=False)
 
-    # Time series
-    ts = time_series_ats(games, handicap=handicap, perspective=perspective, cumulative=True)
+    # Sort and display
+    sorted_df = results_df.sort_values(sort_by, ascending=ascending, na_position='last')
 
-    if len(ts) > 0:
-        fig = px.line(
-            ts,
-            x='game_date',
-            y='cover_pct',
-            title=f"Cumulative {perspective.title()} Cover Rate Over Time",
+    # Format for display
+    display_df = sorted_df[['Team', 'ATS Rating', 'Rank',
+                            '1W Slope', '1W Dir',
+                            '2W Slope', '2W Dir',
+                            '3W Slope', '3W Dir',
+                            'Momentum', 'Accel']].copy()
+
+    # Format numeric columns
+    display_df['ATS Rating'] = display_df['ATS Rating'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else '—')
+    display_df['1W Slope'] = display_df['1W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+    display_df['2W Slope'] = display_df['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+    display_df['3W Slope'] = display_df['3W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+    display_df['Momentum'] = display_df['Momentum'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # Highlight sections
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("🔥 Hottest Teams (Rising Fast)")
+        hot = results_df.nlargest(5, '2W Slope')[['Team', 'ATS Rating', '2W Slope', '2W Dir']].copy()
+        hot['ATS Rating'] = hot['ATS Rating'].apply(lambda x: f"{x:.3f}")
+        hot['2W Slope'] = hot['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+        st.dataframe(hot, hide_index=True, use_container_width=True)
+
+    with col2:
+        st.subheader("❄️ Coldest Teams (Falling Fast)")
+        cold = results_df.nsmallest(5, '2W Slope')[['Team', 'ATS Rating', '2W Slope', '2W Dir']].copy()
+        cold['ATS Rating'] = cold['ATS Rating'].apply(lambda x: f"{x:.3f}")
+        cold['2W Slope'] = cold['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
+        st.dataframe(cold, hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+
+    # Team trajectory mini-chart
+    st.subheader("Team Trajectory")
+    selected_team = st.selectbox("Select team to view trajectory", teams, key="momentum_team_select")
+    team_history = df[df['team'] == selected_team].sort_values('snapshot_date')
+
+    if not team_history.empty:
+        team_history['snapshot_date'] = pd.to_datetime(team_history['snapshot_date'])
+
+        fig = px.line(team_history, x='snapshot_date', y='ats_rating',
+                      title=f"{selected_team} ATS Rating Over Time")
+        fig.update_layout(
+            xaxis_title="Date",
+            yaxis_title="ATS Rating",
+            height=400
         )
-        fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
-        fig.update_yaxes(tickformat='.1%')
+        # Add tier reference lines
+        fig.add_hline(y=0.70, line_dash="dot", line_color="green", annotation_text="TOP (0.70)")
+        fig.add_hline(y=0.55, line_dash="dot", line_color="lightgreen", annotation_text="HIGH (0.55)")
+        fig.add_hline(y=0.45, line_dash="dot", line_color="gray", annotation_text="MID (0.45)")
+        fig.add_hline(y=0.30, line_dash="dot", line_color="orange", annotation_text="LOW (0.30)")
 
         st.plotly_chart(fig, use_container_width=True)
+
+    # Legend
+    with st.expander("Understanding Slope & Momentum Values"):
+        st.markdown("""
+        **Slope** measures the daily rate of change in ATS rating over the specified window:
+
+        | Symbol | Meaning | Slope Value |
+        |--------|---------|-------------|
+        | ↑↑ | Strong Rise | > +0.005/day |
+        | ↑ | Rising | +0.001 to +0.005/day |
+        | → | Flat | -0.001 to +0.001/day |
+        | ↓ | Falling | -0.005 to -0.001/day |
+        | ↓↓ | Strong Fall | < -0.005/day |
+
+        ---
+
+        **Momentum** (1W Slope - 3W Slope) shows if the trend is accelerating or decelerating:
+
+        | Symbol | Meaning | Value |
+        |--------|---------|-------|
+        | 🚀 | Strong Acceleration | > +0.003 |
+        | ⬆️ | Accelerating | +0.001 to +0.003 |
+        | ➡️ | Steady | -0.001 to +0.001 |
+        | ⬇️ | Decelerating | -0.003 to -0.001 |
+        | 🔻 | Strong Deceleration | < -0.003 |
+
+        ---
+
+        **Strategy Implications**:
+        - **Rising + Accelerating** (↑ + 🚀): Strong buy signal - team improving and getting better faster
+        - **Rising + Decelerating** (↑ + 🔻): Trend may be peaking - watch for reversal
+        - **Falling + Accelerating** (↓ + 🚀): Potential bottom - decline slowing down
+        - **Falling + Decelerating** (↓ + 🔻): Avoid - team declining and getting worse faster
+        """)
+
+
 
 
 # =============================================================================
@@ -2232,25 +1506,77 @@ Example: If spread is -7 (home favored by 7):
 
 
 # =============================================================================
+# Page: Current ATS Streaks
+# =============================================================================
+
+def page_current_streaks():
+    """Display current ATS streaks for all teams in the selected sport."""
+    st.title("🔥 Current ATS Streaks")
+    st.caption(f"Track which {selected_sport} teams are currently hot or cold against the spread")
+
+    streaks = get_current_streaks(conn, selected_sport)
+    if not streaks:
+        st.warning(f"No streak data available for {selected_sport}")
+        return
+
+    # Get ratings as dict for lookup
+    rankings = {r.team: r for r in (get_team_rankings(conn, selected_sport) or [])}
+
+    # Build dataframe
+    rows = []
+    for team, info in streaks.items():
+        r = rankings.get(team)
+        rows.append({
+            'Team': team,
+            'Length': info['streak_length'],
+            'Streak': f"{info['streak_length']} {info['streak_type']}",
+            'Type': info['streak_type'],
+            'Win Rtg': round(r.win_rating, 3) if r else None,
+            'ATS Rtg': round(r.ats_rating, 3) if r else None,
+        })
+    df = pd.DataFrame(rows)
+
+    sort_by = st.selectbox("Sort by", ["Length", "Team", "Win Rtg", "ATS Rtg"])
+    cols = ['Team', 'Length', 'Streak', 'Win Rtg', 'ATS Rtg']
+
+    # Hot streaks
+    st.subheader("🔥 Hot Streaks (2+ ATS Wins)")
+    hot = df[(df['Type'] == 'WIN') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+    if not hot.empty:
+        st.dataframe(hot[cols], use_container_width=True, hide_index=True)
+
+    # Cold streaks
+    st.subheader("❄️ Cold Streaks (2+ ATS Losses)")
+    cold = df[(df['Type'] == 'LOSS') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+    if not cold.empty:
+        st.dataframe(cold[cols], use_container_width=True, hide_index=True)
+
+    # All teams
+    st.subheader("📊 All Teams")
+    df_sorted = df.sort_values(sort_by, ascending=(sort_by == "Team"), na_position='last')
+    st.dataframe(df_sorted[cols], use_container_width=True, hide_index=True)
+
+
+# =============================================================================
 # Main Router
 # =============================================================================
 
-if page == "📋 Strategy Overview":
-    page_matchup_opportunities()
-elif page == "🎲 Today's Picks":
+if page == "🎲 Today's Picks":
     page_todays_picks()
 elif page == "🏆 Power Rankings":
     page_power_rankings()
-elif page == "📈 Backtest Strategies":
-    page_backtest()
+elif page == "📉 ATS Rating Trajectory":
+    page_ats_trajectory()
+elif page == "📈 ATS Momentum":
+    page_ats_momentum()
+elif page == "🔥 Current Streaks":
+    page_current_streaks()
 elif page == "Macro Trends":
     page_macro_trends()
 elif page == "Micro (Team) Analysis":
     page_micro_analysis()
 elif page == "Streak Analysis":
     page_streak_analysis()
-elif page == "Exploration":
-    page_exploration()
 elif page == "Verification":
     page_verification()
 

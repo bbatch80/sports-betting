@@ -51,6 +51,14 @@ LAMBDA_FUNCTIONS = {
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
         'schedule': 'cron(0 8 * * ? *)'  # 3:00 AM EST (8:00 UTC) - after all games complete
+    },
+    'generate-historical-ratings': {
+        'description': 'Generates daily team rating snapshots for backtesting',
+        'timeout': 600,  # 10 minutes (rating computation can be intensive)
+        'memory': 1024,  # MB (more for iterative algorithm)
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': 'cron(15 11 * * ? *)'  # 6:15 AM EST (11:15 UTC) - after collect-yesterday-games
     }
 }
 

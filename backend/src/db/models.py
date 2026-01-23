@@ -48,13 +48,18 @@ games = Table(
     Column("home_team", String(100), nullable=False),
     Column("away_team", String(100), nullable=False),
 
-    # Betting data
+    # Betting data - Spreads
     Column("closing_spread", Float),  # Spread for home team (negative = favored)
+
+    # Betting data - Totals (Over/Under)
+    Column("closing_total", Float),   # Over/under line at game start
 
     # Results
     Column("home_score", Integer),
     Column("away_score", Integer),
     Column("spread_result", Float),  # home_score - away_score - closing_spread
+    Column("total_result", Float),   # (home_score + away_score) - closing_total
+                                     # Positive = OVER, Negative = UNDER
 
     # Ensure no duplicate games
     UniqueConstraint(
@@ -134,9 +139,13 @@ todays_games = Table(
     Column("home_team", String(100), nullable=False),
     Column("away_team", String(100), nullable=False),
 
-    # Betting data
+    # Betting data - Spreads
     Column("spread", Float),  # Spread for home team (negative = favored)
     Column("spread_source", String(50)),  # Bookmaker name (e.g., DraftKings)
+
+    # Betting data - Totals (Over/Under)
+    Column("total", Float),           # Over/under line
+    Column("total_source", String(50)),  # Bookmaker name
 
     # Timestamps
     Column("created_at", DateTime),
