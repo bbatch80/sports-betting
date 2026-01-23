@@ -6,6 +6,8 @@ Run with: streamlit run dashboard/app.py
 """
 
 import sys
+import time
+import functools
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -23,6 +25,34 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+
+# =============================================================================
+# Performance Profiling Utilities
+# =============================================================================
+
+def timed(func):
+    """
+    Decorator to measure function execution time.
+    Only displays timing when debug_timing is enabled in session state.
+    """
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = (time.perf_counter() - start) * 1000
+        if st.session_state.get('debug_timing'):
+            st.caption(f"⏱️ {func.__name__}: {elapsed:.1f}ms")
+        return result
+    return wrapper
+
+
+def db_ping(conn) -> float:
+    """Measure database round-trip latency."""
+    from sqlalchemy import text
+    start = time.perf_counter()
+    conn.execute(text("SELECT 1"))
+    return (time.perf_counter() - start) * 1000
 
 from src.database import get_connection, get_games, get_all_teams, get_sports, get_date_range, get_game_count
 from src.analysis.metrics import (
@@ -48,9 +78,12 @@ from src.analysis.aggregations import (
 from src.analysis.insights import (
     detect_patterns,
     get_current_streaks,
+    get_cached_streaks,
+    get_cached_patterns,
 )
 from src.analysis.network_ratings import (
     get_team_rankings,
+    get_cached_rankings,
     get_rankings_dataframe,
 )
 from src.analysis.tier_matchups import get_tier
@@ -97,6 +130,98 @@ def load_teams(sport: str):
     return get_all_teams(conn, sport)
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_streak_continuation(_conn, sport: str, streak_length: int, streak_type: str):
+    """Cached streak continuation analysis."""
+    return streak_continuation_analysis(_conn, sport, streak_length, streak_type)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_baseline_coverage(_conn, sport: str):
+    """Cached baseline handicap coverage."""
+    return baseline_handicap_coverage(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_streak_summary(_conn, sport: str):
+    """Cached streak summary for all lengths."""
+    return streak_summary_all_lengths(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_historical_ratings(_conn, sport: str) -> pd.DataFrame:
+    """Cached historical ratings query for trajectory/momentum pages."""
+    from sqlalchemy import text
+
+    query = text("""
+        SELECT snapshot_date, team, ats_rating, ats_rank
+        FROM historical_ratings
+        WHERE sport = :sport
+        ORDER BY snapshot_date, team
+    """)
+
+    try:
+        result = _conn.execute(query, {'sport': sport})
+        rows = result.fetchall()
+    except Exception:
+        return pd.DataFrame()
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows, columns=['snapshot_date', 'team', 'ats_rating', 'ats_rank'])
+    df['snapshot_date'] = pd.to_datetime(df['snapshot_date']).dt.date
+    return df
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_team_slopes(_historical_df, sport: str) -> pd.DataFrame:
+    """
+    Pre-compute slopes for all teams at once (vectorized where possible).
+    Returns DataFrame with Team, ATS Rating, Rank, and slope columns.
+    """
+    from scipy.stats import linregress
+
+    if _historical_df.empty:
+        return pd.DataFrame()
+
+    teams = sorted(_historical_df['team'].unique())
+    latest_date = pd.to_datetime(_historical_df['snapshot_date']).max()
+
+    results = []
+    for team in teams:
+        team_data = _historical_df[_historical_df['team'] == team].sort_values('snapshot_date')
+        if team_data.empty:
+            continue
+
+        current_rating = team_data['ats_rating'].iloc[-1]
+        current_rank = int(team_data['ats_rank'].iloc[-1]) if pd.notna(team_data['ats_rank'].iloc[-1]) else None
+
+        slopes = {}
+        for label, days in [('1w', 7), ('2w', 14), ('3w', 21)]:
+            cutoff = latest_date - pd.Timedelta(days=days)
+            window = team_data[pd.to_datetime(team_data['snapshot_date']) >= cutoff]
+
+            if len(window) >= 3:
+                x = (pd.to_datetime(window['snapshot_date']) - pd.to_datetime(window['snapshot_date']).min()).dt.days
+                y = window['ats_rating']
+                slope, _, _, _, _ = linregress(x, y)
+                slopes[label] = slope
+            else:
+                slopes[label] = None
+
+        results.append({
+            'Team': team,
+            'ATS Rating': current_rating,
+            'Rank': current_rank,
+            '1W Slope': slopes['1w'],
+            '2W Slope': slopes['2w'],
+            '3W Slope': slopes['3w'],
+        })
+
+    return pd.DataFrame(results)
+
+
 # =============================================================================
 # Sidebar - Navigation & Filters
 # =============================================================================
@@ -121,6 +246,16 @@ if sports:
     count = get_game_count(conn, selected_sport)
     date_range = get_date_range(conn, selected_sport)
     st.sidebar.caption(f"{count} games • {date_range[0]} to {date_range[1]}")
+
+# Debug timing toggle
+st.sidebar.markdown("---")
+if st.sidebar.checkbox("🔧 Show timing", value=False, key="timing_toggle"):
+    st.session_state['debug_timing'] = True
+    # Show DB latency when debug is enabled
+    latency = db_ping(conn)
+    st.sidebar.caption(f"DB latency: {latency:.1f}ms")
+else:
+    st.session_state['debug_timing'] = False
 
 
 # =============================================================================
@@ -266,6 +401,7 @@ def page_macro_trends():
 # Page: Micro (Team) Analysis
 # =============================================================================
 
+@timed
 def page_micro_analysis():
     st.title("Micro Analysis (Team-Specific)")
     st.markdown(f"Individual team ATS analysis for **{selected_sport}**")
@@ -463,9 +599,9 @@ def page_streak_analysis():
     Select a streak length and type, then see coverage rates at every handicap level for **{selected_sport}**.
     """)
 
-    # First, show available streak data
+    # First, show available streak data (cached)
     with st.spinner("Loading streak summary..."):
-        summary = streak_summary_all_lengths(conn, selected_sport)
+        summary = cached_streak_summary(conn, selected_sport)
 
     if len(summary) == 0:
         st.warning("No streak data found")
@@ -506,10 +642,10 @@ def page_streak_analysis():
         st.warning(f"No {streak_length}-game {streak_type} streaks found")
         return
 
-    # Run handicap analysis
+    # Run handicap analysis (cached for speed)
     with st.spinner("Analyzing handicap coverage..."):
-        handicap_data = streak_continuation_analysis(conn, selected_sport, streak_length, streak_type)
-        baseline_data = baseline_handicap_coverage(conn, selected_sport)
+        handicap_data = cached_streak_continuation(conn, selected_sport, streak_length, streak_type)
+        baseline_data = cached_baseline_coverage(conn, selected_sport)
 
     if len(handicap_data) == 0:
         st.warning("No data found")
@@ -615,6 +751,7 @@ def page_streak_analysis():
 # Page: Today's Picks (Primary Navigation)
 # =============================================================================
 
+@timed
 def page_todays_picks():
     st.title("🎲 Today's Picks")
     st.markdown("""
@@ -622,13 +759,8 @@ def page_todays_picks():
     Recommendations are generated by cross-referencing today's games against detected streak patterns.
     """)
 
-    # Detect streak patterns (needed for recommendations)
-    @st.cache_data(ttl=3600, show_spinner=False)
-    def cached_detect_patterns(_conn):
-        return detect_patterns(_conn, min_sample=30, min_edge=0.05)
-
-    with st.spinner("Detecting patterns..."):
-        patterns = cached_detect_patterns(conn)
+    # Get pre-computed patterns (fast database lookup)
+    patterns = get_cached_patterns(conn, min_sample=30, min_edge=0.05)
 
     # Show last updated timestamp
     last_updated = get_games_last_updated(conn)
@@ -747,10 +879,10 @@ def page_todays_picks():
 
                 st.markdown("---")
 
-    # Current team streaks (collapsible)
+    # Current team streaks (collapsible) - use cached for speed
     with st.expander("📊 All Current Team Streaks"):
         for sport in ['NFL', 'NBA', 'NCAAM']:
-            streaks = get_current_streaks(conn, sport)
+            streaks = get_cached_streaks(conn, sport)
             if streaks:
                 st.markdown(f"**{sport}**")
                 streak_data = []
@@ -770,6 +902,7 @@ def page_todays_picks():
 # Page: Power Rankings
 # =============================================================================
 
+@timed
 def page_power_rankings():
     st.title("🏆 Power Rankings")
     st.markdown(f"""
@@ -793,9 +926,9 @@ def page_power_rankings():
     with col3:
         show_unreliable = st.checkbox("Show teams < min games", value=False, key="pr_unreliable")
 
-    # Get rankings
-    with st.spinner("Computing power rankings..."):
-        rankings = get_team_rankings(conn, selected_sport, min_games=min_games)
+    # Get rankings (from pre-computed cache for fast loads)
+    with st.spinner("Loading power rankings..."):
+        rankings = get_cached_rankings(conn, selected_sport, min_games=min_games)
 
     if not rankings:
         st.warning(f"No ranking data found for {selected_sport}")
@@ -999,6 +1132,7 @@ def calculate_team_slopes(df: pd.DataFrame, team: str) -> dict:
 # Page: ATS Rating Trajectory
 # =============================================================================
 
+@timed
 def page_ats_trajectory():
     """Visualize how team ATS ratings evolve over time."""
     st.title("ATS Rating Trajectory")
@@ -1009,30 +1143,12 @@ def page_ats_trajectory():
     with col1:
         page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="trajectory_sport")
 
-    # Query historical ratings
-    from sqlalchemy import text
+    # Use cached historical ratings query
+    df = cached_historical_ratings(conn, page_sport)
 
-    query = text("""
-        SELECT snapshot_date, team, ats_rating, ats_rank
-        FROM historical_ratings
-        WHERE sport = :sport
-        ORDER BY snapshot_date, team
-    """)
-
-    try:
-        result = conn.execute(query, {'sport': page_sport})
-        rows = result.fetchall()
-    except Exception as e:
-        st.error(f"Error loading historical ratings: {e}")
-        return
-
-    if not rows:
+    if df.empty:
         st.warning(f"No historical ratings found for {page_sport}")
         return
-
-    # Build DataFrame
-    df = pd.DataFrame(rows, columns=['snapshot_date', 'team', 'ats_rating', 'ats_rank'])
-    df['snapshot_date'] = pd.to_datetime(df['snapshot_date']).dt.date
 
     # Get list of teams
     teams = sorted(df['team'].unique())
@@ -1169,6 +1285,7 @@ def page_ats_trajectory():
 # Page: ATS Momentum (Slope Analysis)
 # =============================================================================
 
+@timed
 def page_ats_momentum():
     """Track team ATS rating momentum - which teams are trending up or down."""
     st.title("📈 ATS Rating Momentum")
@@ -1179,54 +1296,18 @@ def page_ats_momentum():
     with col1:
         page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="momentum_sport")
 
-    # Query historical ratings
-    from sqlalchemy import text
+    # Use cached historical ratings and slopes
+    df = cached_historical_ratings(conn, page_sport)
 
-    query = text("""
-        SELECT snapshot_date, team, ats_rating, ats_rank
-        FROM historical_ratings
-        WHERE sport = :sport
-        ORDER BY team, snapshot_date
-    """)
-
-    try:
-        result = conn.execute(query, {'sport': page_sport})
-        rows = result.fetchall()
-    except Exception as e:
-        st.error(f"Error loading historical ratings: {e}")
-        return
-
-    if not rows:
+    if df.empty:
         st.warning(f"No historical ratings found for {page_sport}")
         return
 
-    # Build DataFrame
-    df = pd.DataFrame(rows, columns=['snapshot_date', 'team', 'ats_rating', 'ats_rank'])
-
-    # Get unique teams
+    # Get unique teams for the trajectory selector at bottom
     teams = sorted(df['team'].unique())
 
-    # Calculate slopes for each team
-    results = []
-    for team in teams:
-        team_data = df[df['team'] == team].sort_values('snapshot_date')
-        if team_data.empty:
-            continue
-
-        current_rating = team_data['ats_rating'].iloc[-1]
-        current_rank = int(team_data['ats_rank'].iloc[-1]) if pd.notna(team_data['ats_rank'].iloc[-1]) else None
-        slopes = calculate_team_slopes(df, team)
-
-        results.append({
-            'Team': team,
-            'ATS Rating': current_rating,
-            'Rank': current_rank,
-            '1W Slope': slopes['1w'],
-            '2W Slope': slopes['2w'],
-            '3W Slope': slopes['3w'],
-        })
-
-    results_df = pd.DataFrame(results)
+    # Use cached slopes computation (big win - was computing for all teams on every load)
+    results_df = cached_team_slopes(df, page_sport)
 
     if results_df.empty:
         st.warning("No data available to calculate momentum")
@@ -1514,13 +1595,14 @@ def page_current_streaks():
     st.title("🔥 Current ATS Streaks")
     st.caption(f"Track which {selected_sport} teams are currently hot or cold against the spread")
 
-    streaks = get_current_streaks(conn, selected_sport)
+    # Use cached streaks for fast loads
+    streaks = get_cached_streaks(conn, selected_sport)
     if not streaks:
         st.warning(f"No streak data available for {selected_sport}")
         return
 
-    # Get ratings as dict for lookup
-    rankings = {r.team: r for r in (get_team_rankings(conn, selected_sport) or [])}
+    # Get ratings as dict for lookup (also cached for fast loads)
+    rankings = {r.team: r for r in (get_cached_rankings(conn, selected_sport) or [])}
 
     # Build dataframe
     rows = []

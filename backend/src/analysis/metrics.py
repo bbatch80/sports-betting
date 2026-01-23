@@ -184,10 +184,10 @@ def team_ats_cover_rate(df: pd.DataFrame, handicap: float = 0) -> float:
     """
     Calculate ATS cover rate for a specific team.
 
-    Expects DataFrame with 'team_covered' column (from get_games with team filter).
+    Uses vectorized numpy operations for performance (10-100x faster than apply).
 
     Args:
-        df: DataFrame with team_covered and spread_result columns
+        df: DataFrame with is_home and spread_result columns
         handicap: Additional points to give the team
 
     Returns:
@@ -196,22 +196,26 @@ def team_ats_cover_rate(df: pd.DataFrame, handicap: float = 0) -> float:
     if len(df) == 0 or 'is_home' not in df.columns:
         return 0.0
 
-    # Apply handicap adjustment
-    df = df.copy()
+    # Vectorized calculation using numpy
     # When team is home: spread_result + handicap >= 0 means cover
     # When team is away: spread_result - handicap <= 0 means cover
-    df['covered_with_handicap'] = df.apply(
-        lambda r: (r['spread_result'] + handicap >= 0) if r['is_home']
-                  else (r['spread_result'] - handicap <= 0),
-        axis=1
+    spread_result = df['spread_result'].values
+    is_home = df['is_home'].values
+
+    covered = np.where(
+        is_home,
+        spread_result + handicap >= 0,
+        spread_result - handicap <= 0
     )
 
-    return df['covered_with_handicap'].mean()
+    return float(covered.mean())
 
 
 def team_ats_record(df: pd.DataFrame, handicap: float = 0) -> Tuple[int, int, int]:
     """
     Calculate ATS record for a specific team.
+
+    Uses vectorized numpy operations for performance (10-100x faster than iterrows).
 
     Args:
         df: DataFrame with is_home and spread_result columns
@@ -223,22 +227,21 @@ def team_ats_record(df: pd.DataFrame, handicap: float = 0) -> Tuple[int, int, in
     if len(df) == 0 or 'is_home' not in df.columns:
         return (0, 0, 0)
 
-    wins = 0
-    losses = 0
-    pushes = 0
+    # Vectorized calculation using numpy
+    # When home: adjusted = spread_result + handicap
+    # When away: adjusted = -(spread_result - handicap)
+    spread_result = df['spread_result'].values
+    is_home = df['is_home'].values
 
-    for _, row in df.iterrows():
-        if row['is_home']:
-            adjusted = row['spread_result'] + handicap
-        else:
-            adjusted = -(row['spread_result'] - handicap)
+    adjusted = np.where(
+        is_home,
+        spread_result + handicap,
+        -(spread_result - handicap)
+    )
 
-        if adjusted > 0:
-            wins += 1
-        elif adjusted < 0:
-            losses += 1
-        else:
-            pushes += 1
+    wins = int((adjusted > 0).sum())
+    losses = int((adjusted < 0).sum())
+    pushes = int((adjusted == 0).sum())
 
     return (wins, losses, pushes)
 
