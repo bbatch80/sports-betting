@@ -67,6 +67,10 @@ from src.analysis.metrics import (
     streak_summary_all_lengths,
     get_streak_situations_detail,
     baseline_handicap_coverage,
+    ou_cover_rate,
+    ou_record,
+    team_ou_cover_rate,
+    team_ou_record,
 )
 from src.analysis.aggregations import (
     macro_ats_summary,
@@ -74,12 +78,18 @@ from src.analysis.aggregations import (
     macro_by_spread_bucket,
     micro_team_summary,
     micro_all_teams,
+    macro_ou_summary,
+    macro_ou_time_series,
+    macro_ou_by_total_bucket,
+    micro_ou_all_teams,
 )
 from src.analysis.insights import (
     detect_patterns,
     get_current_streaks,
     get_cached_streaks,
     get_cached_patterns,
+    get_current_ou_streaks,
+    get_cached_ou_streaks,
 )
 from src.analysis.network_ratings import (
     get_team_rankings,
@@ -265,7 +275,7 @@ else:
 
 def page_macro_trends():
     st.title("Macro Trends (League-Wide)")
-    st.markdown(f"League-wide ATS analysis for **{selected_sport}**")
+    st.markdown(f"League-wide analysis for **{selected_sport}**")
 
     games = load_games(selected_sport)
 
@@ -273,129 +283,271 @@ def page_macro_trends():
         st.warning(f"No games found for {selected_sport}")
         return
 
-    # Tabs for different views
-    tab1, tab2, tab3 = st.tabs(["ATS Summary", "Time Series", "Spread Buckets"])
+    # Top-level Spread/Totals toggle
+    analysis_type = st.tabs(["Spread Analysis", "Totals Analysis"])
 
-    # ----- Tab 1: ATS Summary by Handicap -----
-    with tab1:
-        st.subheader("ATS Cover Rate by Handicap")
+    # =========================================================================
+    # SPREAD ANALYSIS
+    # =========================================================================
+    with analysis_type[0]:
+        tab1, tab2, tab3 = st.tabs(["ATS Summary", "Time Series", "Spread Buckets"])
 
-        col1, col2 = st.columns(2)
+        # ----- Tab 1: ATS Summary by Handicap -----
+        with tab1:
+            st.subheader("ATS Cover Rate by Handicap")
 
-        with col1:
-            handicaps = st.multiselect(
-                "Handicaps to analyze",
-                options=list(range(0, 16)),
-                default=[0, 3, 5, 7, 10, 11, 13, 15]
+            col1, col2 = st.columns(2)
+
+            with col1:
+                handicaps = st.multiselect(
+                    "Handicaps to analyze",
+                    options=list(range(0, 16)),
+                    default=[0, 3, 5, 7, 10, 11, 13, 15]
+                )
+
+            summary = macro_ats_summary(games, handicaps=handicaps)
+
+            # Create comparison chart
+            fig = go.Figure()
+
+            fig.add_trace(go.Scatter(
+                x=summary['handicap'],
+                y=summary['home_pct'] * 100,
+                mode='lines+markers',
+                name='Home Teams',
+                line=dict(color='#1f77b4', width=2),
+                marker=dict(size=8)
+            ))
+
+            fig.add_trace(go.Scatter(
+                x=summary['handicap'],
+                y=summary['away_pct'] * 100,
+                mode='lines+markers',
+                name='Away Teams',
+                line=dict(color='#ff7f0e', width=2),
+                marker=dict(size=8)
+            ))
+
+            # 50% reference line
+            fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50%")
+
+            fig.update_layout(
+                title=f"{selected_sport} ATS Cover Rate by Handicap",
+                xaxis_title="Handicap (points)",
+                yaxis_title="Cover Rate (%)",
+                yaxis=dict(range=[40, 100]),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                height=400
             )
-
-        summary = macro_ats_summary(games, handicaps=handicaps)
-
-        # Create comparison chart
-        fig = go.Figure()
-
-        fig.add_trace(go.Scatter(
-            x=summary['handicap'],
-            y=summary['home_pct'] * 100,
-            mode='lines+markers',
-            name='Home Teams',
-            line=dict(color='#1f77b4', width=2),
-            marker=dict(size=8)
-        ))
-
-        fig.add_trace(go.Scatter(
-            x=summary['handicap'],
-            y=summary['away_pct'] * 100,
-            mode='lines+markers',
-            name='Away Teams',
-            line=dict(color='#ff7f0e', width=2),
-            marker=dict(size=8)
-        ))
-
-        # 50% reference line
-        fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50%")
-
-        fig.update_layout(
-            title=f"{selected_sport} ATS Cover Rate by Handicap",
-            xaxis_title="Handicap (points)",
-            yaxis_title="Cover Rate (%)",
-            yaxis=dict(range=[40, 100]),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02),
-            height=400
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Show data table
-        with st.expander("View Data Table"):
-            display_df = summary.copy()
-            display_df['home_pct'] = (display_df['home_pct'] * 100).round(1).astype(str) + '%'
-            display_df['away_pct'] = (display_df['away_pct'] * 100).round(1).astype(str) + '%'
-            st.dataframe(display_df, hide_index=True)
-
-    # ----- Tab 2: Time Series -----
-    with tab2:
-        st.subheader("ATS Cover Rate Over Time (Cumulative)")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            ts_handicap = st.slider("Handicap", 0, 15, 0, key="ts_handicap")
-        with col2:
-            ts_perspective = st.selectbox("Perspective", ["home", "away"], key="ts_perspective")
-
-        ts_data = macro_time_series(games, handicap=ts_handicap, perspective=ts_perspective)
-
-        if len(ts_data) > 0:
-            fig = px.line(
-                ts_data,
-                x='game_date',
-                y='cover_pct',
-                title=f"Cumulative {ts_perspective.title()} Team Cover Rate (+{ts_handicap}pt handicap)",
-                labels={'game_date': 'Date', 'cover_pct': 'Cover Rate'}
-            )
-
-            fig.update_traces(line_color='#1f77b4')
-            fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
-            fig.update_yaxes(tickformat='.1%')
-            fig.update_layout(height=400)
 
             st.plotly_chart(fig, use_container_width=True)
 
-            # Summary stats
-            col1, col2, col3 = st.columns(3)
-            latest = ts_data.iloc[-1]
-            col1.metric("Total Games", int(latest['games']))
-            col2.metric("Total Covers", int(latest['covers']))
-            col3.metric("Cover Rate", f"{latest['cover_pct']:.1%}")
-
-    # ----- Tab 3: Spread Buckets -----
-    with tab3:
-        st.subheader("ATS Performance by Spread Size")
-
-        bucket_data = macro_by_spread_bucket(games)
-
-        if len(bucket_data) > 0:
-            # Bar chart
-            fig = px.bar(
-                bucket_data,
-                x='bucket',
-                y='home_pct',
-                title="Home Team Cover Rate by Spread Bucket",
-                labels={'bucket': 'Spread Bucket', 'home_pct': 'Home Cover Rate'},
-                text=bucket_data['home_pct'].apply(lambda x: f'{x:.1%}')
-            )
-
-            fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
-            fig.update_traces(textposition='outside')
-            fig.update_layout(height=450)
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Data table
+            # Show data table
             with st.expander("View Data Table"):
-                display_df = bucket_data[['bucket', 'games', 'home_covers', 'home_pct']].copy()
+                display_df = summary.copy()
                 display_df['home_pct'] = (display_df['home_pct'] * 100).round(1).astype(str) + '%'
+                display_df['away_pct'] = (display_df['away_pct'] * 100).round(1).astype(str) + '%'
                 st.dataframe(display_df, hide_index=True)
+
+        # ----- Tab 2: Time Series -----
+        with tab2:
+            st.subheader("ATS Cover Rate Over Time (Cumulative)")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                ts_handicap = st.slider("Handicap", 0, 15, 0, key="ts_handicap")
+            with col2:
+                ts_perspective = st.selectbox("Perspective", ["home", "away"], key="ts_perspective")
+
+            ts_data = macro_time_series(games, handicap=ts_handicap, perspective=ts_perspective)
+
+            if len(ts_data) > 0:
+                fig = px.line(
+                    ts_data,
+                    x='game_date',
+                    y='cover_pct',
+                    title=f"Cumulative {ts_perspective.title()} Team Cover Rate (+{ts_handicap}pt handicap)",
+                    labels={'game_date': 'Date', 'cover_pct': 'Cover Rate'}
+                )
+
+                fig.update_traces(line_color='#1f77b4')
+                fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                fig.update_yaxes(tickformat='.1%')
+                fig.update_layout(height=400)
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Summary stats
+                col1, col2, col3 = st.columns(3)
+                latest = ts_data.iloc[-1]
+                col1.metric("Total Games", int(latest['games']))
+                col2.metric("Total Covers", int(latest['covers']))
+                col3.metric("Cover Rate", f"{latest['cover_pct']:.1%}")
+
+        # ----- Tab 3: Spread Buckets -----
+        with tab3:
+            st.subheader("ATS Performance by Spread Size")
+
+            bucket_data = macro_by_spread_bucket(games)
+
+            if len(bucket_data) > 0:
+                # Bar chart
+                fig = px.bar(
+                    bucket_data,
+                    x='bucket',
+                    y='home_pct',
+                    title="Home Team Cover Rate by Spread Bucket",
+                    labels={'bucket': 'Spread Bucket', 'home_pct': 'Home Cover Rate'},
+                    text=bucket_data['home_pct'].apply(lambda x: f'{x:.1%}')
+                )
+
+                fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                fig.update_traces(textposition='outside')
+                fig.update_layout(height=450)
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Data table
+                with st.expander("View Data Table"):
+                    display_df = bucket_data[['bucket', 'games', 'home_covers', 'home_pct']].copy()
+                    display_df['home_pct'] = (display_df['home_pct'] * 100).round(1).astype(str) + '%'
+                    st.dataframe(display_df, hide_index=True)
+
+    # =========================================================================
+    # TOTALS ANALYSIS
+    # =========================================================================
+    with analysis_type[1]:
+        tab1, tab2, tab3 = st.tabs(["O/U Summary", "Time Series", "Total Buckets"])
+
+        # ----- Tab 1: O/U Summary by Handicap -----
+        with tab1:
+            st.subheader("Over/Under Cover Rate by Handicap")
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+                ou_handicaps = st.multiselect(
+                    "Handicaps to analyze",
+                    options=list(range(0, 21)),
+                    default=[0, 3, 5, 7, 10, 13, 15, 17, 20],
+                    key="ou_handicaps"
+                )
+
+            ou_summary = macro_ou_summary(games, handicaps=ou_handicaps)
+
+            if len(ou_summary) == 0:
+                st.warning("No totals data available for this sport")
+            else:
+                # Create comparison chart
+                fig = go.Figure()
+
+                fig.add_trace(go.Scatter(
+                    x=ou_summary['handicap'],
+                    y=ou_summary['over_pct'] * 100,
+                    mode='lines+markers',
+                    name='OVER',
+                    line=dict(color='#2ecc71', width=2),
+                    marker=dict(size=8)
+                ))
+
+                fig.add_trace(go.Scatter(
+                    x=ou_summary['handicap'],
+                    y=ou_summary['under_pct'] * 100,
+                    mode='lines+markers',
+                    name='UNDER',
+                    line=dict(color='#e74c3c', width=2),
+                    marker=dict(size=8)
+                ))
+
+                # 50% reference line
+                fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50%")
+
+                fig.update_layout(
+                    title=f"{selected_sport} O/U Cover Rate by Handicap",
+                    xaxis_title="Handicap (points)",
+                    yaxis_title="Cover Rate (%)",
+                    yaxis=dict(range=[20, 80]),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                    height=400
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Show data table
+                with st.expander("View Data Table"):
+                    display_df = ou_summary.copy()
+                    display_df['over_pct'] = (display_df['over_pct'] * 100).round(1).astype(str) + '%'
+                    display_df['under_pct'] = (display_df['under_pct'] * 100).round(1).astype(str) + '%'
+                    st.dataframe(display_df[['handicap', 'games', 'over_wins', 'over_pct', 'under_wins', 'under_pct']], hide_index=True)
+
+        # ----- Tab 2: Time Series -----
+        with tab2:
+            st.subheader("O/U Cover Rate Over Time (Cumulative)")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                ou_ts_handicap = st.slider("Handicap", 0, 20, 0, key="ou_ts_handicap")
+            with col2:
+                ou_ts_direction = st.selectbox("Direction", ["over", "under"], key="ou_ts_direction")
+
+            ou_ts_data = macro_ou_time_series(games, handicap=ou_ts_handicap, direction=ou_ts_direction)
+
+            if len(ou_ts_data) > 0:
+                fig = px.line(
+                    ou_ts_data,
+                    x='game_date',
+                    y='cover_pct',
+                    title=f"Cumulative {ou_ts_direction.upper()} Cover Rate (+{ou_ts_handicap}pt handicap)",
+                    labels={'game_date': 'Date', 'cover_pct': 'Cover Rate'}
+                )
+
+                color = '#2ecc71' if ou_ts_direction == 'over' else '#e74c3c'
+                fig.update_traces(line_color=color)
+                fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                fig.update_yaxes(tickformat='.1%')
+                fig.update_layout(height=400)
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Summary stats
+                col1, col2, col3 = st.columns(3)
+                latest = ou_ts_data.iloc[-1]
+                col1.metric("Total Games", int(latest['games']))
+                col2.metric(f"Total {ou_ts_direction.upper()}s", int(latest['covers']))
+                col3.metric("Cover Rate", f"{latest['cover_pct']:.1%}")
+            else:
+                st.warning("No totals data available for this sport")
+
+        # ----- Tab 3: Total Buckets -----
+        with tab3:
+            st.subheader("O/U Performance by Total Size")
+
+            ou_bucket_data = macro_ou_by_total_bucket(games)
+
+            if len(ou_bucket_data) > 0:
+                # Bar chart
+                fig = px.bar(
+                    ou_bucket_data,
+                    x='bucket',
+                    y='over_pct',
+                    title="OVER Rate by Total Bucket",
+                    labels={'bucket': 'Total Bucket', 'over_pct': 'OVER Rate'},
+                    text=ou_bucket_data['over_pct'].apply(lambda x: f'{x:.1%}')
+                )
+
+                fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                fig.update_traces(textposition='outside', marker_color='#2ecc71')
+                fig.update_layout(height=450)
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Data table
+                with st.expander("View Data Table"):
+                    display_df = ou_bucket_data[['bucket', 'games', 'overs', 'unders', 'over_pct']].copy()
+                    display_df['over_pct'] = (display_df['over_pct'] * 100).round(1).astype(str) + '%'
+                    st.dataframe(display_df, hide_index=True)
+            else:
+                st.warning("No totals data available for this sport")
 
 
 # =============================================================================
@@ -405,7 +557,7 @@ def page_macro_trends():
 @timed
 def page_micro_analysis():
     st.title("Micro Analysis (Team-Specific)")
-    st.markdown(f"Individual team ATS analysis for **{selected_sport}**")
+    st.markdown(f"Individual team analysis for **{selected_sport}**")
 
     teams = load_teams(selected_sport)
 
@@ -413,179 +565,354 @@ def page_micro_analysis():
         st.warning(f"No teams found for {selected_sport}")
         return
 
-    # Tabs
-    tab1, tab2 = st.tabs(["All Teams Comparison", "Individual Team Deep Dive"])
+    # Top-level Spread/Totals toggle
+    analysis_type = st.tabs(["Spread Analysis", "Totals Analysis"])
 
-    # ----- Tab 1: All Teams -----
-    with tab1:
-        st.subheader("All Teams ATS Performance")
+    # =========================================================================
+    # SPREAD ANALYSIS
+    # =========================================================================
+    with analysis_type[0]:
+        tab1, tab2 = st.tabs(["All Teams Comparison", "Individual Team Deep Dive"])
 
-        col1, col2 = st.columns(2)
-        with col1:
-            team_handicap = st.slider("Handicap", 0, 15, 0, key="team_handicap")
-        with col2:
-            min_games = st.slider("Minimum Games", 1, 20, 5, key="min_games")
+        # ----- Tab 1: All Teams -----
+        with tab1:
+            st.subheader("All Teams ATS Performance")
 
-        teams_df = micro_all_teams(conn, selected_sport, handicap=team_handicap, min_games=min_games)
+            col1, col2 = st.columns(2)
+            with col1:
+                team_handicap = st.slider("Handicap", 0, 15, 0, key="team_handicap")
+            with col2:
+                min_games = st.slider("Minimum Games", 1, 20, 5, key="min_games")
 
-        if len(teams_df) > 0:
-            # Chart - Top and Bottom 10
-            top_10 = teams_df.head(10)
-            bottom_10 = teams_df.tail(10)
+            teams_df = micro_all_teams(conn, selected_sport, handicap=team_handicap, min_games=min_games)
 
-            fig = make_subplots(
-                rows=1, cols=2,
-                subplot_titles=("Top 10 by ATS %", "Bottom 10 by ATS %")
-            )
+            if len(teams_df) > 0:
+                # Chart - Top and Bottom 10
+                top_10 = teams_df.head(10)
+                bottom_10 = teams_df.tail(10)
 
-            fig.add_trace(
-                go.Bar(
-                    y=top_10['team'],
-                    x=top_10['ats_pct'] * 100,
-                    orientation='h',
-                    marker_color='#2ecc71',
-                    text=top_10['ats_pct'].apply(lambda x: f'{x:.1%}'),
-                    textposition='auto',
-                    name='Top 10'
-                ),
-                row=1, col=1
-            )
-
-            fig.add_trace(
-                go.Bar(
-                    y=bottom_10['team'],
-                    x=bottom_10['ats_pct'] * 100,
-                    orientation='h',
-                    marker_color='#e74c3c',
-                    text=bottom_10['ats_pct'].apply(lambda x: f'{x:.1%}'),
-                    textposition='auto',
-                    name='Bottom 10'
-                ),
-                row=1, col=2
-            )
-
-            fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=1)
-            fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=2)
-
-            fig.update_layout(
-                height=500,
-                showlegend=False,
-                title_text=f"Team ATS Rankings (+{team_handicap}pt handicap, min {min_games} games)"
-            )
-
-            st.plotly_chart(fig, use_container_width=True)
-
-            # Full table
-            with st.expander("View All Teams"):
-                display_df = teams_df.copy()
-                display_df['ats_pct'] = (display_df['ats_pct'] * 100).round(1).astype(str) + '%'
-                display_df['record'] = display_df.apply(
-                    lambda r: f"{int(r['ats_wins'])}-{int(r['ats_losses'])}-{int(r['ats_pushes'])}",
-                    axis=1
-                )
-                st.dataframe(
-                    display_df[['team', 'games', 'record', 'ats_pct']],
-                    hide_index=True,
-                    use_container_width=True
+                fig = make_subplots(
+                    rows=1, cols=2,
+                    subplot_titles=("Top 10 by ATS %", "Bottom 10 by ATS %")
                 )
 
-    # ----- Tab 2: Individual Team -----
-    with tab2:
-        st.subheader("Individual Team Deep Dive")
-
-        selected_team = st.selectbox("Select Team", teams)
-
-        if selected_team:
-            # Get team's games
-            team_games = get_games(conn, sport=selected_sport, team=selected_team)
-
-            if len(team_games) > 0:
-                home_games = team_games[team_games['is_home'] == True]
-                away_games = team_games[team_games['is_home'] == False]
-
-                # Summary metrics
-                col1, col2, col3, col4 = st.columns(4)
-
-                overall_w, overall_l, overall_p = team_ats_record(team_games, handicap=0)
-                overall_pct = team_ats_cover_rate(team_games, handicap=0)
-
-                col1.metric("Total Games", len(team_games))
-                col2.metric("ATS Record", f"{overall_w}-{overall_l}-{overall_p}")
-                col3.metric("ATS Cover %", f"{overall_pct:.1%}")
-                col4.metric("Avg Spread Margin", f"{spread_margin_avg(team_games, 'home'):.1f}")
-
-                # Home vs Away breakdown
-                st.markdown("---")
-                st.markdown("**Home vs Away Breakdown**")
-
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.markdown("**Home Games**")
-                    if len(home_games) > 0:
-                        h_w, h_l, h_p = team_ats_record(home_games, handicap=0)
-                        h_pct = team_ats_cover_rate(home_games, handicap=0)
-                        st.write(f"Games: {len(home_games)}")
-                        st.write(f"Record: {h_w}-{h_l}-{h_p}")
-                        st.write(f"Cover %: {h_pct:.1%}")
-                    else:
-                        st.write("No home games")
-
-                with col2:
-                    st.markdown("**Away Games**")
-                    if len(away_games) > 0:
-                        a_w, a_l, a_p = team_ats_record(away_games, handicap=0)
-                        a_pct = team_ats_cover_rate(away_games, handicap=0)
-                        st.write(f"Games: {len(away_games)}")
-                        st.write(f"Record: {a_w}-{a_l}-{a_p}")
-                        st.write(f"Cover %: {a_pct:.1%}")
-                    else:
-                        st.write("No away games")
-
-                # Handicap coverage table
-                st.markdown("---")
-                st.markdown("**Handicap Coverage Analysis**")
-
-                handicap_results = []
-                for h in range(0, 16):
-                    w, l, p = team_ats_record(team_games, handicap=h)
-                    total = w + l + p
-                    pct = w / total if total > 0 else 0
-                    handicap_results.append({
-                        'handicap': h,
-                        'wins': w,
-                        'losses': l,
-                        'pushes': p,
-                        'cover_pct': pct
-                    })
-
-                hc_df = pd.DataFrame(handicap_results)
-
-                fig = px.line(
-                    hc_df,
-                    x='handicap',
-                    y='cover_pct',
-                    title=f"{selected_team} Cover Rate by Handicap",
-                    markers=True
+                fig.add_trace(
+                    go.Bar(
+                        y=top_10['team'],
+                        x=top_10['ats_pct'] * 100,
+                        orientation='h',
+                        marker_color='#2ecc71',
+                        text=top_10['ats_pct'].apply(lambda x: f'{x:.1%}'),
+                        textposition='auto',
+                        name='Top 10'
+                    ),
+                    row=1, col=1
                 )
-                fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
-                fig.update_yaxes(tickformat='.0%')
-                fig.update_layout(height=350)
+
+                fig.add_trace(
+                    go.Bar(
+                        y=bottom_10['team'],
+                        x=bottom_10['ats_pct'] * 100,
+                        orientation='h',
+                        marker_color='#e74c3c',
+                        text=bottom_10['ats_pct'].apply(lambda x: f'{x:.1%}'),
+                        textposition='auto',
+                        name='Bottom 10'
+                    ),
+                    row=1, col=2
+                )
+
+                fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=1)
+                fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=2)
+
+                fig.update_layout(
+                    height=500,
+                    showlegend=False,
+                    title_text=f"Team ATS Rankings (+{team_handicap}pt handicap, min {min_games} games)"
+                )
 
                 st.plotly_chart(fig, use_container_width=True)
 
-                # Recent games
-                with st.expander("View All Games"):
-                    display_games = team_games[['game_date', 'home_team', 'away_team',
-                                                'closing_spread', 'home_score', 'away_score',
-                                                'spread_result', 'is_home', 'team_covered']].copy()
-                    display_games = display_games.sort_values('game_date', ascending=False)
-                    display_games['result'] = display_games['team_covered'].apply(
-                        lambda x: '✅ Cover' if x else '❌ Loss'
+                # Full table
+                with st.expander("View All Teams"):
+                    display_df = teams_df.copy()
+                    display_df['ats_pct'] = (display_df['ats_pct'] * 100).round(1).astype(str) + '%'
+                    display_df['record'] = display_df.apply(
+                        lambda r: f"{int(r['ats_wins'])}-{int(r['ats_losses'])}-{int(r['ats_pushes'])}",
+                        axis=1
                     )
-                    st.dataframe(display_games, hide_index=True, use_container_width=True)
+                    st.dataframe(
+                        display_df[['team', 'games', 'record', 'ats_pct']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
+
+        # ----- Tab 2: Individual Team -----
+        with tab2:
+            st.subheader("Individual Team Deep Dive")
+
+            selected_team = st.selectbox("Select Team", teams, key="ats_team_select")
+
+            if selected_team:
+                # Get team's games
+                team_games = get_games(conn, sport=selected_sport, team=selected_team)
+
+                if len(team_games) > 0:
+                    home_games = team_games[team_games['is_home'] == True]
+                    away_games = team_games[team_games['is_home'] == False]
+
+                    # Summary metrics
+                    col1, col2, col3, col4 = st.columns(4)
+
+                    overall_w, overall_l, overall_p = team_ats_record(team_games, handicap=0)
+                    overall_pct = team_ats_cover_rate(team_games, handicap=0)
+
+                    col1.metric("Total Games", len(team_games))
+                    col2.metric("ATS Record", f"{overall_w}-{overall_l}-{overall_p}")
+                    col3.metric("ATS Cover %", f"{overall_pct:.1%}")
+                    col4.metric("Avg Spread Margin", f"{spread_margin_avg(team_games, 'home'):.1f}")
+
+                    # Home vs Away breakdown
+                    st.markdown("---")
+                    st.markdown("**Home vs Away Breakdown**")
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.markdown("**Home Games**")
+                        if len(home_games) > 0:
+                            h_w, h_l, h_p = team_ats_record(home_games, handicap=0)
+                            h_pct = team_ats_cover_rate(home_games, handicap=0)
+                            st.write(f"Games: {len(home_games)}")
+                            st.write(f"Record: {h_w}-{h_l}-{h_p}")
+                            st.write(f"Cover %: {h_pct:.1%}")
+                        else:
+                            st.write("No home games")
+
+                    with col2:
+                        st.markdown("**Away Games**")
+                        if len(away_games) > 0:
+                            a_w, a_l, a_p = team_ats_record(away_games, handicap=0)
+                            a_pct = team_ats_cover_rate(away_games, handicap=0)
+                            st.write(f"Games: {len(away_games)}")
+                            st.write(f"Record: {a_w}-{a_l}-{a_p}")
+                            st.write(f"Cover %: {a_pct:.1%}")
+                        else:
+                            st.write("No away games")
+
+                    # Handicap coverage table
+                    st.markdown("---")
+                    st.markdown("**Handicap Coverage Analysis**")
+
+                    handicap_results = []
+                    for h in range(0, 16):
+                        w, l, p = team_ats_record(team_games, handicap=h)
+                        total = w + l + p
+                        pct = w / total if total > 0 else 0
+                        handicap_results.append({
+                            'handicap': h,
+                            'wins': w,
+                            'losses': l,
+                            'pushes': p,
+                            'cover_pct': pct
+                        })
+
+                    hc_df = pd.DataFrame(handicap_results)
+
+                    fig = px.line(
+                        hc_df,
+                        x='handicap',
+                        y='cover_pct',
+                        title=f"{selected_team} Cover Rate by Handicap",
+                        markers=True
+                    )
+                    fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                    fig.update_yaxes(tickformat='.0%')
+                    fig.update_layout(height=350)
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Recent games
+                    with st.expander("View All Games"):
+                        display_games = team_games[['game_date', 'home_team', 'away_team',
+                                                    'closing_spread', 'home_score', 'away_score',
+                                                    'spread_result', 'is_home', 'team_covered']].copy()
+                        display_games = display_games.sort_values('game_date', ascending=False)
+                        display_games['result'] = display_games['team_covered'].apply(
+                            lambda x: '✅ Cover' if x else '❌ Loss'
+                        )
+                        st.dataframe(display_games, hide_index=True, use_container_width=True)
+                else:
+                    st.warning(f"No games found for {selected_team}")
+
+    # =========================================================================
+    # TOTALS ANALYSIS
+    # =========================================================================
+    with analysis_type[1]:
+        tab1, tab2 = st.tabs(["All Teams O/U", "Individual Team O/U"])
+
+        # ----- Tab 1: All Teams O/U -----
+        with tab1:
+            st.subheader("All Teams O/U Performance")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                ou_team_handicap = st.slider("Handicap", 0, 20, 0, key="ou_team_handicap")
+            with col2:
+                ou_min_games = st.slider("Minimum Games", 1, 20, 5, key="ou_min_games")
+
+            ou_teams_df = micro_ou_all_teams(conn, selected_sport, handicap=ou_team_handicap, min_games=ou_min_games)
+
+            if len(ou_teams_df) > 0:
+                # Chart - Top and Bottom 10 by OVER %
+                top_10 = ou_teams_df.head(10)
+                bottom_10 = ou_teams_df.tail(10)
+
+                fig = make_subplots(
+                    rows=1, cols=2,
+                    subplot_titles=("Top 10 by OVER %", "Bottom 10 by OVER %")
+                )
+
+                fig.add_trace(
+                    go.Bar(
+                        y=top_10['team'],
+                        x=top_10['over_pct'] * 100,
+                        orientation='h',
+                        marker_color='#2ecc71',
+                        text=top_10['over_pct'].apply(lambda x: f'{x:.1%}'),
+                        textposition='auto',
+                        name='Top 10'
+                    ),
+                    row=1, col=1
+                )
+
+                fig.add_trace(
+                    go.Bar(
+                        y=bottom_10['team'],
+                        x=bottom_10['over_pct'] * 100,
+                        orientation='h',
+                        marker_color='#e74c3c',
+                        text=bottom_10['over_pct'].apply(lambda x: f'{x:.1%}'),
+                        textposition='auto',
+                        name='Bottom 10'
+                    ),
+                    row=1, col=2
+                )
+
+                fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=1)
+                fig.add_vline(x=50, line_dash="dash", line_color="gray", row=1, col=2)
+
+                fig.update_layout(
+                    height=500,
+                    showlegend=False,
+                    title_text=f"Team O/U Rankings (+{ou_team_handicap}pt handicap, min {ou_min_games} games)"
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Full table
+                with st.expander("View All Teams"):
+                    display_df = ou_teams_df.copy()
+                    display_df['over_pct'] = (display_df['over_pct'] * 100).round(1).astype(str) + '%'
+                    display_df['record'] = display_df.apply(
+                        lambda r: f"{int(r['overs'])}-{int(r['unders'])}-{int(r['pushes'])}",
+                        axis=1
+                    )
+                    display_df['avg_margin'] = display_df['avg_total_margin'].apply(lambda x: f"{x:+.1f}")
+                    st.dataframe(
+                        display_df[['team', 'games', 'record', 'over_pct', 'avg_margin']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
             else:
-                st.warning(f"No games found for {selected_team}")
+                st.warning("No totals data available for this sport")
+
+        # ----- Tab 2: Individual Team O/U -----
+        with tab2:
+            st.subheader("Individual Team O/U Deep Dive")
+
+            ou_selected_team = st.selectbox("Select Team", teams, key="ou_team_select")
+
+            if ou_selected_team:
+                # Get team's games
+                team_games = get_games(conn, sport=selected_sport, team=ou_selected_team)
+
+                if len(team_games) > 0 and 'total_result' in team_games.columns:
+                    # Filter games with totals data
+                    valid_games = team_games[team_games['total_result'].notna()]
+
+                    if len(valid_games) > 0:
+                        # Summary metrics
+                        col1, col2, col3, col4 = st.columns(4)
+
+                        ou_w, ou_l, ou_p = team_ou_record(valid_games, handicap=0)
+                        ou_pct = team_ou_cover_rate(valid_games, handicap=0)
+                        avg_total_margin = valid_games['total_result'].mean()
+
+                        col1.metric("Games w/ Totals", len(valid_games))
+                        col2.metric("O/U Record", f"{ou_w}-{ou_l}-{ou_p}")
+                        col3.metric("OVER Rate", f"{ou_pct:.1%}")
+                        col4.metric("Avg Total Margin", f"{avg_total_margin:+.1f}")
+
+                        # O/U bias indicator
+                        st.markdown("---")
+                        if avg_total_margin > 2:
+                            st.success(f"**OVER Bias**: This team's games average {avg_total_margin:.1f} points OVER the total")
+                        elif avg_total_margin < -2:
+                            st.error(f"**UNDER Bias**: This team's games average {abs(avg_total_margin):.1f} points UNDER the total")
+                        else:
+                            st.info(f"**Neutral**: This team's games are close to the total (avg {avg_total_margin:+.1f})")
+
+                        # Handicap coverage analysis
+                        st.markdown("---")
+                        st.markdown("**Handicap Coverage Analysis (OVER)**")
+
+                        ou_handicap_results = []
+                        for h in range(0, 21):
+                            w, l, p = team_ou_record(valid_games, handicap=h)
+                            total = w + l + p
+                            pct = w / total if total > 0 else 0
+                            ou_handicap_results.append({
+                                'handicap': h,
+                                'overs': w,
+                                'unders': l,
+                                'pushes': p,
+                                'over_pct': pct
+                            })
+
+                        ou_hc_df = pd.DataFrame(ou_handicap_results)
+
+                        fig = px.line(
+                            ou_hc_df,
+                            x='handicap',
+                            y='over_pct',
+                            title=f"{ou_selected_team} OVER Rate by Handicap",
+                            markers=True
+                        )
+                        fig.add_hline(y=0.5, line_dash="dash", line_color="gray")
+                        fig.update_yaxes(tickformat='.0%')
+                        fig.update_traces(line_color='#2ecc71')
+                        fig.update_layout(height=350)
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                        # Recent games with totals
+                        with st.expander("View All Games"):
+                            display_cols = ['game_date', 'home_team', 'away_team', 'home_score', 'away_score']
+                            if 'closing_total' in valid_games.columns:
+                                display_cols.append('closing_total')
+                            display_cols.append('total_result')
+
+                            display_games = valid_games[display_cols].copy()
+                            display_games = display_games.sort_values('game_date', ascending=False)
+                            display_games['result'] = display_games['total_result'].apply(
+                                lambda x: '🟢 OVER' if x > 0 else ('🔴 UNDER' if x < 0 else '⚪ PUSH')
+                            )
+                            st.dataframe(display_games, hide_index=True, use_container_width=True)
+                    else:
+                        st.warning(f"No totals data found for {ou_selected_team}")
+                else:
+                    st.warning(f"No games found for {ou_selected_team}")
 
 
 # =============================================================================
@@ -594,158 +921,265 @@ def page_micro_analysis():
 
 def page_streak_analysis():
     st.title("Streak Continuation Analysis")
-    st.markdown(f"""
-    **Question:** After a team covers/loses X games in a row, how does their next game perform across different handicaps (0-15 points)?
 
-    Select a streak length and type, then see coverage rates at every handicap level for **{selected_sport}**.
-    """)
+    # Top-level Spread/Totals toggle
+    streak_type_tabs = st.tabs(["Spread Streaks", "Totals Streaks"])
 
-    # First, show available streak data (cached)
-    with st.spinner("Loading streak summary..."):
-        summary = cached_streak_summary(conn, selected_sport)
+    # =========================================================================
+    # SPREAD STREAKS
+    # =========================================================================
+    with streak_type_tabs[0]:
+        st.markdown(f"""
+        **Question:** After a team covers/loses X games in a row, how does their next game perform across different handicaps (0-15 points)?
 
-    if len(summary) == 0:
-        st.warning("No streak data found")
-        return
+        Select a streak length and type, then see coverage rates at every handicap level for **{selected_sport}**.
+        """)
 
-    # Show summary table
-    st.subheader("Available Streak Data")
+        # First, show available streak data (cached)
+        with st.spinner("Loading streak summary..."):
+            summary = cached_streak_summary(conn, selected_sport)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**WIN Streaks**")
-        win_summary = summary[summary['streak_type'] == 'WIN'][['streak_length', 'situations']]
-        win_summary.columns = ['Streak Length', 'Situations']
-        st.dataframe(win_summary, hide_index=True)
-
-    with col2:
-        st.markdown("**LOSS Streaks**")
-        loss_summary = summary[summary['streak_type'] == 'LOSS'][['streak_length', 'situations']]
-        loss_summary.columns = ['Streak Length', 'Situations']
-        st.dataframe(loss_summary, hide_index=True)
-
-    # Select streak to analyze
-    st.markdown("---")
-    st.subheader("Analyze Handicap Coverage After Streak")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        streak_length = st.selectbox("Streak Length", list(range(2, 11)), index=0, key="streak_len")
-    with col2:
-        streak_type = st.selectbox("Streak Type", ["WIN", "LOSS"], key="streak_type")
-
-    # Check sample size
-    selected_summary = summary[(summary['streak_length'] == streak_length) & (summary['streak_type'] == streak_type)]
-    if len(selected_summary) > 0:
-        sample_size = selected_summary['situations'].values[0]
-        st.info(f"Sample size: **{sample_size}** situations where a team had a {streak_length}-game {streak_type} streak")
-    else:
-        st.warning(f"No {streak_length}-game {streak_type} streaks found")
-        return
-
-    # Run handicap analysis (cached for speed)
-    with st.spinner("Analyzing handicap coverage..."):
-        handicap_data = cached_streak_continuation(conn, selected_sport, streak_length, streak_type)
-        baseline_data = cached_baseline_coverage(conn, selected_sport)
-
-    if len(handicap_data) == 0:
-        st.warning("No data found")
-        return
-
-    # Merge baseline into handicap data
-    handicap_data = handicap_data.merge(baseline_data[['handicap', 'baseline_cover_pct']], on='handicap')
-    handicap_data['edge_vs_baseline'] = handicap_data['cover_pct'] - handicap_data['baseline_cover_pct']
-
-    # Chart: Cover rate by handicap with baseline comparison
-    st.subheader(f"Next Game Cover Rate by Handicap (After {streak_length}-Game {streak_type} Streak)")
-
-    fig = go.Figure()
-
-    # Bars for streak cover rate - color based on vs baseline
-    fig.add_trace(go.Bar(
-        name=f'After {streak_length}-Game {streak_type} Streak',
-        x=handicap_data['handicap'],
-        y=handicap_data['cover_pct'] * 100,
-        marker_color=['#e74c3c' if edge < 0 else '#2ecc71' for edge in handicap_data['edge_vs_baseline']],
-        text=handicap_data['cover_pct'].apply(lambda x: f"{x:.1%}"),
-        textposition='outside'
-    ))
-
-    # Baseline trend line
-    fig.add_trace(go.Scatter(
-        name=f'{selected_sport} Baseline',
-        x=baseline_data['handicap'],
-        y=baseline_data['baseline_cover_pct'] * 100,
-        mode='lines+markers',
-        line=dict(color='#3498db', width=3, dash='solid'),
-        marker=dict(size=8)
-    ))
-
-    fig.update_layout(
-        xaxis_title="Handicap (points added to spread)",
-        yaxis_title="Cover Rate (%)",
-        yaxis=dict(range=[0, 100]),
-        height=500,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02),
-        barmode='overlay'
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Interpretation
-    st.markdown(f"""
-    **How to read this chart:**
-    - **Bars** = Cover rate after a {streak_length}-game {streak_type} streak
-    - **Blue line** = League-wide baseline cover rate at each handicap
-    - **Green bars** = streak situations OUTPERFORM the baseline (potential edge)
-    - **Red bars** = streak situations UNDERPERFORM the baseline (fade opportunity)
-
-    **Key insight:** Where the bars exceed the blue line, there may be a betting edge.
-    """)
-
-    # Data table
-    with st.expander("View Data Table"):
-        display = handicap_data.copy()
-        display['cover_pct_fmt'] = display['cover_pct'].apply(lambda x: f"{x:.1%}")
-        display['baseline_fmt'] = display['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
-        display['edge_fmt'] = display['edge_vs_baseline'].apply(lambda x: f"{x*100:+.1f}%")
-        display = display.rename(columns={
-            'handicap': 'Handicap',
-            'covers': 'Covers',
-            'total': 'Total',
-            'cover_pct_fmt': 'Streak Cover %',
-            'baseline_fmt': 'Baseline %',
-            'edge_fmt': 'Edge vs Baseline'
-        })
-        st.dataframe(display[['Handicap', 'Total', 'Covers', 'Streak Cover %', 'Baseline %', 'Edge vs Baseline']], hide_index=True)
-
-    # Drill-down to individual games
-    st.markdown("---")
-    st.subheader("View Individual Situations")
-
-    if st.button("Load All Situations"):
-        with st.spinner("Loading..."):
-            situations = get_streak_situations_detail(conn, selected_sport, streak_length, streak_type, handicap=0)
-
-        if len(situations) > 0:
-            st.success(f"Found {len(situations)} situations")
-
-            # Summary at 0 handicap
-            cover_pct = situations['next_covered'].mean()
-            st.metric(
-                f"Cover Rate at 0 Handicap",
-                f"{cover_pct:.1%}",
-                f"{(cover_pct - 0.5) * 100:+.1f}% vs baseline"
-            )
-
-            # Table
-            st.dataframe(
-                situations[['team', 'next_game_date', 'next_opponent', 'next_is_home', 'next_spread', 'result']].sort_values('next_game_date', ascending=False),
-                hide_index=True,
-                use_container_width=True
-            )
+        if len(summary) == 0:
+            st.warning("No streak data found")
         else:
-            st.warning("No situations found")
+            # Show summary table
+            st.subheader("Available Streak Data")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("**WIN Streaks**")
+                win_summary = summary[summary['streak_type'] == 'WIN'][['streak_length', 'situations']]
+                win_summary.columns = ['Streak Length', 'Situations']
+                st.dataframe(win_summary, hide_index=True)
+
+            with col2:
+                st.markdown("**LOSS Streaks**")
+                loss_summary = summary[summary['streak_type'] == 'LOSS'][['streak_length', 'situations']]
+                loss_summary.columns = ['Streak Length', 'Situations']
+                st.dataframe(loss_summary, hide_index=True)
+
+            # Select streak to analyze
+            st.markdown("---")
+            st.subheader("Analyze Handicap Coverage After Streak")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                streak_length = st.selectbox("Streak Length", list(range(2, 11)), index=0, key="streak_len")
+            with col2:
+                streak_type = st.selectbox("Streak Type", ["WIN", "LOSS"], key="streak_type")
+
+            # Check sample size
+            selected_summary = summary[(summary['streak_length'] == streak_length) & (summary['streak_type'] == streak_type)]
+            if len(selected_summary) > 0:
+                sample_size = selected_summary['situations'].values[0]
+                st.info(f"Sample size: **{sample_size}** situations where a team had a {streak_length}-game {streak_type} streak")
+
+                # Run handicap analysis (cached for speed)
+                with st.spinner("Analyzing handicap coverage..."):
+                    handicap_data = cached_streak_continuation(conn, selected_sport, streak_length, streak_type)
+                    baseline_data = cached_baseline_coverage(conn, selected_sport)
+
+                if len(handicap_data) > 0:
+                    # Merge baseline into handicap data
+                    handicap_data = handicap_data.merge(baseline_data[['handicap', 'baseline_cover_pct']], on='handicap')
+                    handicap_data['edge_vs_baseline'] = handicap_data['cover_pct'] - handicap_data['baseline_cover_pct']
+
+                    # Chart: Cover rate by handicap with baseline comparison
+                    st.subheader(f"Next Game Cover Rate by Handicap (After {streak_length}-Game {streak_type} Streak)")
+
+                    fig = go.Figure()
+
+                    # Bars for streak cover rate - color based on vs baseline
+                    fig.add_trace(go.Bar(
+                        name=f'After {streak_length}-Game {streak_type} Streak',
+                        x=handicap_data['handicap'],
+                        y=handicap_data['cover_pct'] * 100,
+                        marker_color=['#e74c3c' if edge < 0 else '#2ecc71' for edge in handicap_data['edge_vs_baseline']],
+                        text=handicap_data['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                        textposition='outside'
+                    ))
+
+                    # Baseline trend line
+                    fig.add_trace(go.Scatter(
+                        name=f'{selected_sport} Baseline',
+                        x=baseline_data['handicap'],
+                        y=baseline_data['baseline_cover_pct'] * 100,
+                        mode='lines+markers',
+                        line=dict(color='#3498db', width=3, dash='solid'),
+                        marker=dict(size=8)
+                    ))
+
+                    fig.update_layout(
+                        xaxis_title="Handicap (points added to spread)",
+                        yaxis_title="Cover Rate (%)",
+                        yaxis=dict(range=[0, 100]),
+                        height=500,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        barmode='overlay'
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Interpretation
+                    st.markdown(f"""
+                    **How to read this chart:**
+                    - **Bars** = Cover rate after a {streak_length}-game {streak_type} streak
+                    - **Blue line** = League-wide baseline cover rate at each handicap
+                    - **Green bars** = streak situations OUTPERFORM the baseline (potential edge)
+                    - **Red bars** = streak situations UNDERPERFORM the baseline (fade opportunity)
+
+                    **Key insight:** Where the bars exceed the blue line, there may be a betting edge.
+                    """)
+
+                    # Data table
+                    with st.expander("View Data Table"):
+                        display = handicap_data.copy()
+                        display['cover_pct_fmt'] = display['cover_pct'].apply(lambda x: f"{x:.1%}")
+                        display['baseline_fmt'] = display['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                        display['edge_fmt'] = display['edge_vs_baseline'].apply(lambda x: f"{x*100:+.1f}%")
+                        display = display.rename(columns={
+                            'handicap': 'Handicap',
+                            'covers': 'Covers',
+                            'total': 'Total',
+                            'cover_pct_fmt': 'Streak Cover %',
+                            'baseline_fmt': 'Baseline %',
+                            'edge_fmt': 'Edge vs Baseline'
+                        })
+                        st.dataframe(display[['Handicap', 'Total', 'Covers', 'Streak Cover %', 'Baseline %', 'Edge vs Baseline']], hide_index=True)
+
+                    # Drill-down to individual games
+                    st.markdown("---")
+                    st.subheader("View Individual Situations")
+
+                    if st.button("Load All Situations", key="load_ats_situations"):
+                        with st.spinner("Loading..."):
+                            situations = get_streak_situations_detail(conn, selected_sport, streak_length, streak_type, handicap=0)
+
+                        if len(situations) > 0:
+                            st.success(f"Found {len(situations)} situations")
+
+                            # Summary at 0 handicap
+                            cover_pct = situations['next_covered'].mean()
+                            st.metric(
+                                f"Cover Rate at 0 Handicap",
+                                f"{cover_pct:.1%}",
+                                f"{(cover_pct - 0.5) * 100:+.1f}% vs baseline"
+                            )
+
+                            # Table
+                            st.dataframe(
+                                situations[['team', 'next_game_date', 'next_opponent', 'next_is_home', 'next_spread', 'result']].sort_values('next_game_date', ascending=False),
+                                hide_index=True,
+                                use_container_width=True
+                            )
+                        else:
+                            st.warning("No situations found")
+                else:
+                    st.warning("No data found")
+            else:
+                st.warning(f"No {streak_length}-game {streak_type} streaks found")
+
+    # =========================================================================
+    # TOTALS STREAKS
+    # =========================================================================
+    with streak_type_tabs[1]:
+        st.markdown(f"""
+        **O/U Streaks:** Track which teams are on OVER or UNDER streaks for **{selected_sport}**.
+
+        Teams on long OVER streaks may be good candidates for OVER bets (momentum), or UNDER bets (regression).
+        """)
+
+        # Get current O/U streaks
+        with st.spinner("Loading O/U streaks..."):
+            ou_streaks = get_current_ou_streaks(conn, selected_sport)
+
+        if not ou_streaks:
+            st.warning(f"No O/U streak data found for {selected_sport}")
+        else:
+            # Build streak data for display
+            streak_data = []
+            for team, info in ou_streaks.items():
+                streak_data.append({
+                    'team': team,
+                    'streak_length': info['streak_length'],
+                    'streak_type': info['streak_type'],
+                })
+
+            streak_df = pd.DataFrame(streak_data)
+
+            # Summary
+            st.markdown("---")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Teams with Streaks", len(streak_df))
+
+            over_streaks = streak_df[streak_df['streak_type'] == 'OVER']
+            under_streaks = streak_df[streak_df['streak_type'] == 'UNDER']
+            col2.metric("OVER Streaks", len(over_streaks))
+            col3.metric("UNDER Streaks", len(under_streaks))
+
+            # Display by streak type
+            st.markdown("---")
+            col1, col2 = st.columns(2)
+
+            with col1:
+                st.subheader("🟢 OVER Streaks")
+                if len(over_streaks) > 0:
+                    over_sorted = over_streaks.sort_values('streak_length', ascending=False)
+                    for _, row in over_sorted.iterrows():
+                        st.markdown(f"**{row['team']}**: {row['streak_length']}-game OVER streak")
+                else:
+                    st.info("No teams on OVER streaks")
+
+            with col2:
+                st.subheader("🔴 UNDER Streaks")
+                if len(under_streaks) > 0:
+                    under_sorted = under_streaks.sort_values('streak_length', ascending=False)
+                    for _, row in under_sorted.iterrows():
+                        st.markdown(f"**{row['team']}**: {row['streak_length']}-game UNDER streak")
+                else:
+                    st.info("No teams on UNDER streaks")
+
+            # Streak distribution chart
+            st.markdown("---")
+            st.subheader("O/U Streak Distribution")
+
+            # Group by streak length and type
+            if len(streak_df) > 0:
+                fig = go.Figure()
+
+                for s_type, color in [('OVER', '#2ecc71'), ('UNDER', '#e74c3c')]:
+                    type_data = streak_df[streak_df['streak_type'] == s_type]
+                    if len(type_data) > 0:
+                        counts = type_data.groupby('streak_length').size().reset_index(name='count')
+                        fig.add_trace(go.Bar(
+                            name=s_type,
+                            x=counts['streak_length'],
+                            y=counts['count'],
+                            marker_color=color
+                        ))
+
+                fig.update_layout(
+                    title=f"O/U Streak Length Distribution ({selected_sport})",
+                    xaxis_title="Streak Length (games)",
+                    yaxis_title="Number of Teams",
+                    barmode='group',
+                    height=400
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+            # Full data table
+            with st.expander("View All O/U Streaks"):
+                display_df = streak_df.copy()
+                display_df['streak'] = display_df.apply(
+                    lambda r: f"{r['streak_length']}-game {r['streak_type']}",
+                    axis=1
+                )
+                st.dataframe(
+                    display_df[['team', 'streak_type', 'streak_length', 'streak']].sort_values('streak_length', ascending=False),
+                    hide_index=True,
+                    use_container_width=True
+                )
 
 
 # =============================================================================
@@ -851,32 +1285,49 @@ def page_todays_picks():
 
                     st.caption(f"Combined Confidence: {combined_conf}")
 
-                # Streak info in expander
-                with st.expander("Team Details"):
+                # Team Details and O/U info in expander
+                with st.expander("Team Details & O/U Streaks"):
                     detail_col1, detail_col2 = st.columns(2)
+
+                    # Get O/U streaks for both teams
+                    ou_streaks = get_current_ou_streaks(conn, game.sport)
+                    home_ou_streak = ou_streaks.get(game.home_team, {})
+                    away_ou_streak = ou_streaks.get(game.away_team, {})
 
                     with detail_col1:
                         st.markdown(f"**{game.home_team}** (Home)")
                         if game.home_ats_rating is not None:
                             st.write(f"ATS Rating: {game.home_ats_rating:.3f} ({game.home_tier})")
                         if game.home_streak:
-                            st.write(f"Streak: {game.home_streak[0]}-game ATS {game.home_streak[1].lower()}")
+                            st.write(f"ATS Streak: {game.home_streak[0]}-game {game.home_streak[1].lower()}")
                         else:
-                            st.write("No current streak")
+                            st.write("No current ATS streak")
+                        # O/U streak
+                        if home_ou_streak:
+                            ou_icon = "🟢" if home_ou_streak.get('streak_type') == 'OVER' else "🔴"
+                            st.write(f"O/U Streak: {ou_icon} {home_ou_streak.get('streak_length', 0)}-game {home_ou_streak.get('streak_type', 'N/A')}")
+                        else:
+                            st.write("No current O/U streak")
 
                     with detail_col2:
                         st.markdown(f"**{game.away_team}** (Away)")
                         if game.away_ats_rating is not None:
                             st.write(f"ATS Rating: {game.away_ats_rating:.3f} ({game.away_tier})")
                         if game.away_streak:
-                            st.write(f"Streak: {game.away_streak[0]}-game ATS {game.away_streak[1].lower()}")
+                            st.write(f"ATS Streak: {game.away_streak[0]}-game {game.away_streak[1].lower()}")
                         else:
-                            st.write("No current streak")
+                            st.write("No current ATS streak")
+                        # O/U streak
+                        if away_ou_streak:
+                            ou_icon = "🟢" if away_ou_streak.get('streak_type') == 'OVER' else "🔴"
+                            st.write(f"O/U Streak: {ou_icon} {away_ou_streak.get('streak_length', 0)}-game {away_ou_streak.get('streak_type', 'N/A')}")
+                        else:
+                            st.write("No current O/U streak")
 
                 st.markdown("---")
 
     # Current team streaks (collapsible) - use cached for speed
-    with st.expander("📊 All Current Team Streaks"):
+    with st.expander("📊 All Current Team Streaks (ATS)"):
         for sport in ['NFL', 'NBA', 'NCAAM']:
             streaks = get_cached_streaks(conn, sport)
             if streaks:
@@ -893,6 +1344,25 @@ def page_todays_picks():
                 st.dataframe(streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
                 st.markdown("")
 
+    # O/U streaks (collapsible)
+    with st.expander("📈 All Current O/U Streaks"):
+        for sport in ['NFL', 'NBA', 'NCAAM']:
+            ou_streaks = get_current_ou_streaks(conn, sport)
+            if ou_streaks:
+                st.markdown(f"**{sport}**")
+                ou_streak_data = []
+                for team, info in sorted(ou_streaks.items(), key=lambda x: -x[1]['streak_length']):
+                    ou_icon = "🟢" if info['streak_type'] == 'OVER' else "🔴"
+                    ou_streak_data.append({
+                        'Team': team,
+                        'Streak': f"{ou_icon} {info['streak_length']} {info['streak_type']}",
+                        'Length': info['streak_length'],
+                        'Type': info['streak_type']
+                    })
+                ou_streak_df = pd.DataFrame(ou_streak_data)
+                st.dataframe(ou_streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
+                st.markdown("")
+
 
 # =============================================================================
 # Page: Power Rankings
@@ -901,166 +1371,276 @@ def page_todays_picks():
 @timed
 def page_power_rankings():
     st.title("🏆 Power Rankings")
-    st.markdown(f"""
-    **Network-based team ratings** using iterative strength propagation for **{selected_sport}**.
 
-    Two rating types are computed:
-    - **Win Rating**: True team strength based on game outcomes
-    - **ATS Rating**: Market-beating ability based on spread coverage
+    # Top-level Spread/Totals toggle
+    rankings_type = st.tabs(["ATS Rankings", "O/U Bias Rankings"])
 
-    The **Market Gap** (ATS - Win) reveals market efficiency:
-    - 🟢 **Positive gap**: Market undervalues this team (potential betting edge)
-    - 🔴 **Negative gap**: Market overvalues this team (fade candidate)
-    """)
+    # =========================================================================
+    # ATS RANKINGS
+    # =========================================================================
+    with rankings_type[0]:
+        st.markdown(f"""
+        **Network-based team ratings** using iterative strength propagation for **{selected_sport}**.
 
-    # Settings
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        min_games = st.slider("Min Games for Reliable", 1, 20, 5, key="pr_min_games")
-    with col2:
-        sort_by = st.selectbox("Sort By", ["Market Gap", "Win Rating", "ATS Rating"], key="pr_sort")
-    with col3:
-        show_unreliable = st.checkbox("Show teams < min games", value=False, key="pr_unreliable")
+        Two rating types are computed:
+        - **Win Rating**: True team strength based on game outcomes
+        - **ATS Rating**: Market-beating ability based on spread coverage
 
-    # Get rankings (from pre-computed cache for fast loads)
-    with st.spinner("Loading power rankings..."):
-        rankings = get_cached_rankings(conn, selected_sport, min_games=min_games)
-
-    if not rankings:
-        st.warning(f"No ranking data found for {selected_sport}")
-        return
-
-    # Filter unreliable if needed
-    if not show_unreliable:
-        display_rankings = [r for r in rankings if r.is_reliable]
-    else:
-        display_rankings = rankings
-
-    if not display_rankings:
-        st.warning("No teams meet the minimum games threshold")
-        return
-
-    # Sort based on selection
-    if sort_by == "Win Rating":
-        display_rankings = sorted(display_rankings, key=lambda x: x.win_rating, reverse=True)
-    elif sort_by == "ATS Rating":
-        display_rankings = sorted(display_rankings, key=lambda x: x.ats_rating, reverse=True)
-    # Market Gap is already default sort
-
-    # Summary metrics
-    reliable_count = len([r for r in rankings if r.is_reliable])
-    st.markdown("---")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Teams", len(rankings))
-    col2.metric(f"Reliable ({min_games}+ games)", reliable_count)
-    col3.metric("Most Undervalued", display_rankings[0].team if display_rankings else "N/A")
-
-    # Main rankings table
-    st.markdown("---")
-    st.subheader("Rankings Table")
-
-    # Build dataframe for display
-    table_data = []
-    for r in display_rankings:
-        gap_color = "🟢" if r.market_gap > 0.02 else ("🔴" if r.market_gap < -0.02 else "⚪")
-        table_data.append({
-            "Team": r.team,
-            "Win Rtg": f"{r.win_rating:.3f}",
-            "Win Rank": r.win_rank,
-            "ATS Rtg": f"{r.ats_rating:.3f}",
-            "ATS Rank": r.ats_rank,
-            "Gap": f"{gap_color} {r.market_gap:+.3f}",
-            "Record": r.win_record,
-            "ATS Rec": r.ats_record,
-            "Games": r.games_analyzed,
-        })
-
-    df = pd.DataFrame(table_data)
-    st.dataframe(df, hide_index=True, use_container_width=True)
-
-    # Visualization
-    st.markdown("---")
-    st.subheader("Rating Comparison")
-
-    tab1, tab2 = st.tabs(["Market Gap Chart", "Win vs ATS Scatter"])
-
-    with tab1:
-        # Bar chart of market gap (top and bottom)
-        top_n = min(15, len(display_rankings))
-
-        fig = go.Figure()
-
-        # Top by market gap (most undervalued)
-        top_teams = display_rankings[:top_n]
-        fig.add_trace(go.Bar(
-            y=[r.team for r in top_teams],
-            x=[r.market_gap * 100 for r in top_teams],
-            orientation='h',
-            marker_color=['#2ecc71' if r.market_gap > 0 else '#e74c3c' for r in top_teams],
-            text=[f"{r.market_gap:+.1%}" for r in top_teams],
-            textposition='auto',
-            name='Market Gap'
-        ))
-
-        fig.add_vline(x=0, line_dash="dash", line_color="gray")
-
-        fig.update_layout(
-            title=f"Top {top_n} Teams by Market Gap ({selected_sport})",
-            xaxis_title="Market Gap (ATS Rating - Win Rating) %",
-            yaxis_title="",
-            height=max(400, top_n * 30),
-            yaxis=dict(autorange="reversed")
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    with tab2:
-        # Scatter plot: Win Rating vs ATS Rating
-        scatter_data = pd.DataFrame([{
-            'team': r.team,
-            'win_rating': r.win_rating,
-            'ats_rating': r.ats_rating,
-            'market_gap': r.market_gap,
-            'games': r.games_analyzed
-        } for r in display_rankings])
-
-        fig = px.scatter(
-            scatter_data,
-            x='win_rating',
-            y='ats_rating',
-            hover_name='team',
-            color='market_gap',
-            color_continuous_scale=['#e74c3c', '#f0f0f0', '#2ecc71'],
-            color_continuous_midpoint=0,
-            size='games',
-            title=f"Win Rating vs ATS Rating ({selected_sport})",
-            labels={
-                'win_rating': 'Win Rating (True Strength)',
-                'ats_rating': 'ATS Rating (Market-Beating)',
-                'market_gap': 'Market Gap'
-            }
-        )
-
-        # Add diagonal line (where Win = ATS)
-        fig.add_trace(go.Scatter(
-            x=[0, 1],
-            y=[0, 1],
-            mode='lines',
-            line=dict(dash='dash', color='gray'),
-            name='Win = ATS',
-            showlegend=False
-        ))
-
-        fig.update_layout(height=500)
-        st.plotly_chart(fig, use_container_width=True)
-
-        st.caption("""
-        **How to read this chart:**
-        - Points **above** the diagonal line have higher ATS rating than Win rating → undervalued by market
-        - Points **below** the diagonal line have lower ATS rating than Win rating → overvalued by market
-        - Color intensity shows the magnitude of the gap
-        - Size represents games played
+        The **Market Gap** (ATS - Win) reveals market efficiency:
+        - 🟢 **Positive gap**: Market undervalues this team (potential betting edge)
+        - 🔴 **Negative gap**: Market overvalues this team (fade candidate)
         """)
+
+        # Settings
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            min_games = st.slider("Min Games for Reliable", 1, 20, 5, key="pr_min_games")
+        with col2:
+            sort_by = st.selectbox("Sort By", ["Market Gap", "Win Rating", "ATS Rating"], key="pr_sort")
+        with col3:
+            show_unreliable = st.checkbox("Show teams < min games", value=False, key="pr_unreliable")
+
+        # Get rankings (from pre-computed cache for fast loads)
+        with st.spinner("Loading power rankings..."):
+            rankings = get_cached_rankings(conn, selected_sport, min_games=min_games)
+
+        if not rankings:
+            st.warning(f"No ranking data found for {selected_sport}")
+        else:
+            # Filter unreliable if needed
+            if not show_unreliable:
+                display_rankings = [r for r in rankings if r.is_reliable]
+            else:
+                display_rankings = rankings
+
+            if not display_rankings:
+                st.warning("No teams meet the minimum games threshold")
+            else:
+                # Sort based on selection
+                if sort_by == "Win Rating":
+                    display_rankings = sorted(display_rankings, key=lambda x: x.win_rating, reverse=True)
+                elif sort_by == "ATS Rating":
+                    display_rankings = sorted(display_rankings, key=lambda x: x.ats_rating, reverse=True)
+                # Market Gap is already default sort
+
+                # Summary metrics
+                reliable_count = len([r for r in rankings if r.is_reliable])
+                st.markdown("---")
+                col1, col2, col3 = st.columns(3)
+                col1.metric("Total Teams", len(rankings))
+                col2.metric(f"Reliable ({min_games}+ games)", reliable_count)
+                col3.metric("Most Undervalued", display_rankings[0].team if display_rankings else "N/A")
+
+                # Main rankings table
+                st.markdown("---")
+                st.subheader("Rankings Table")
+
+                # Build dataframe for display
+                table_data = []
+                for r in display_rankings:
+                    gap_color = "🟢" if r.market_gap > 0.02 else ("🔴" if r.market_gap < -0.02 else "⚪")
+                    table_data.append({
+                        "Team": r.team,
+                        "Win Rtg": f"{r.win_rating:.3f}",
+                        "Win Rank": r.win_rank,
+                        "ATS Rtg": f"{r.ats_rating:.3f}",
+                        "ATS Rank": r.ats_rank,
+                        "Gap": f"{gap_color} {r.market_gap:+.3f}",
+                        "Record": r.win_record,
+                        "ATS Rec": r.ats_record,
+                        "Games": r.games_analyzed,
+                    })
+
+                df = pd.DataFrame(table_data)
+                st.dataframe(df, hide_index=True, use_container_width=True)
+
+                # Visualization
+                st.markdown("---")
+                st.subheader("Rating Comparison")
+
+                viz_tab1, viz_tab2 = st.tabs(["Market Gap Chart", "Win vs ATS Scatter"])
+
+                with viz_tab1:
+                    # Bar chart of market gap (top and bottom)
+                    top_n = min(15, len(display_rankings))
+
+                    fig = go.Figure()
+
+                    # Top by market gap (most undervalued)
+                    top_teams = display_rankings[:top_n]
+                    fig.add_trace(go.Bar(
+                        y=[r.team for r in top_teams],
+                        x=[r.market_gap * 100 for r in top_teams],
+                        orientation='h',
+                        marker_color=['#2ecc71' if r.market_gap > 0 else '#e74c3c' for r in top_teams],
+                        text=[f"{r.market_gap:+.1%}" for r in top_teams],
+                        textposition='auto',
+                        name='Market Gap'
+                    ))
+
+                    fig.add_vline(x=0, line_dash="dash", line_color="gray")
+
+                    fig.update_layout(
+                        title=f"Top {top_n} Teams by Market Gap ({selected_sport})",
+                        xaxis_title="Market Gap (ATS Rating - Win Rating) %",
+                        yaxis_title="",
+                        height=max(400, top_n * 30),
+                        yaxis=dict(autorange="reversed")
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                with viz_tab2:
+                    # Scatter plot: Win Rating vs ATS Rating
+                    scatter_data = pd.DataFrame([{
+                        'team': r.team,
+                        'win_rating': r.win_rating,
+                        'ats_rating': r.ats_rating,
+                        'market_gap': r.market_gap,
+                        'games': r.games_analyzed
+                    } for r in display_rankings])
+
+                    fig = px.scatter(
+                        scatter_data,
+                        x='win_rating',
+                        y='ats_rating',
+                        hover_name='team',
+                        color='market_gap',
+                        color_continuous_scale=['#e74c3c', '#f0f0f0', '#2ecc71'],
+                        color_continuous_midpoint=0,
+                        size='games',
+                        title=f"Win Rating vs ATS Rating ({selected_sport})",
+                        labels={
+                            'win_rating': 'Win Rating (True Strength)',
+                            'ats_rating': 'ATS Rating (Market-Beating)',
+                            'market_gap': 'Market Gap'
+                        }
+                    )
+
+                    # Add diagonal line (where Win = ATS)
+                    fig.add_trace(go.Scatter(
+                        x=[0, 1],
+                        y=[0, 1],
+                        mode='lines',
+                        line=dict(dash='dash', color='gray'),
+                        name='Win = ATS',
+                        showlegend=False
+                    ))
+
+                    fig.update_layout(height=500)
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    st.caption("""
+                    **How to read this chart:**
+                    - Points **above** the diagonal line have higher ATS rating than Win rating → undervalued by market
+                    - Points **below** the diagonal line have lower ATS rating than Win rating → overvalued by market
+                    - Color intensity shows the magnitude of the gap
+                    - Size represents games played
+                    """)
+
+    # =========================================================================
+    # O/U BIAS RANKINGS
+    # =========================================================================
+    with rankings_type[1]:
+        st.markdown(f"""
+        **O/U Bias Rankings** for **{selected_sport}** - Which teams tend to go OVER or UNDER?
+
+        - 🟢 **Positive Avg Margin**: Games tend to go OVER (high-scoring offense or poor defense)
+        - 🔴 **Negative Avg Margin**: Games tend to go UNDER (strong defense or slow pace)
+        """)
+
+        # Settings
+        col1, col2 = st.columns(2)
+        with col1:
+            ou_min_games = st.slider("Minimum Games", 1, 20, 5, key="ou_pr_min_games")
+        with col2:
+            ou_sort_by = st.selectbox("Sort By", ["OVER Bias (Highest)", "UNDER Bias (Lowest)", "OVER %"], key="ou_pr_sort")
+
+        # Get O/U data for all teams
+        ou_teams_df = micro_ou_all_teams(conn, selected_sport, handicap=0, min_games=ou_min_games)
+
+        if len(ou_teams_df) == 0:
+            st.warning(f"No totals data found for {selected_sport}")
+        else:
+            # Sort based on selection
+            if ou_sort_by == "OVER Bias (Highest)":
+                ou_teams_df = ou_teams_df.sort_values('avg_total_margin', ascending=False)
+            elif ou_sort_by == "UNDER Bias (Lowest)":
+                ou_teams_df = ou_teams_df.sort_values('avg_total_margin', ascending=True)
+            else:  # OVER %
+                ou_teams_df = ou_teams_df.sort_values('over_pct', ascending=False)
+
+            # Summary metrics
+            st.markdown("---")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Teams", len(ou_teams_df))
+
+            over_biased = ou_teams_df[ou_teams_df['avg_total_margin'] > 2]
+            under_biased = ou_teams_df[ou_teams_df['avg_total_margin'] < -2]
+            col2.metric("OVER Biased Teams", len(over_biased))
+            col3.metric("UNDER Biased Teams", len(under_biased))
+
+            # Main rankings table
+            st.markdown("---")
+            st.subheader("O/U Bias Rankings")
+
+            display_df = ou_teams_df.copy()
+            display_df['bias'] = display_df['avg_total_margin'].apply(
+                lambda x: '🟢 OVER' if x > 2 else ('🔴 UNDER' if x < -2 else '⚪ Neutral')
+            )
+            display_df['over_pct_str'] = (display_df['over_pct'] * 100).round(1).astype(str) + '%'
+            display_df['avg_margin_str'] = display_df['avg_total_margin'].apply(lambda x: f"{x:+.1f}")
+            display_df['record'] = display_df.apply(
+                lambda r: f"{int(r['overs'])}-{int(r['unders'])}-{int(r['pushes'])}",
+                axis=1
+            )
+
+            st.dataframe(
+                display_df[['team', 'games', 'record', 'over_pct_str', 'avg_margin_str', 'bias']].rename(columns={
+                    'over_pct_str': 'OVER %',
+                    'avg_margin_str': 'Avg Margin',
+                    'bias': 'Bias'
+                }),
+                hide_index=True,
+                use_container_width=True
+            )
+
+            # Visualization - O/U Bias Bar Chart
+            st.markdown("---")
+            st.subheader("O/U Bias Visualization")
+
+            top_n = min(20, len(ou_teams_df))
+            chart_df = ou_teams_df.head(top_n)
+
+            fig = go.Figure()
+
+            fig.add_trace(go.Bar(
+                y=chart_df['team'],
+                x=chart_df['avg_total_margin'],
+                orientation='h',
+                marker_color=['#2ecc71' if x > 0 else '#e74c3c' for x in chart_df['avg_total_margin']],
+                text=chart_df['avg_total_margin'].apply(lambda x: f"{x:+.1f}"),
+                textposition='auto',
+                name='Avg Total Margin'
+            ))
+
+            fig.add_vline(x=0, line_dash="dash", line_color="gray")
+
+            fig.update_layout(
+                title=f"Top {top_n} Teams by O/U Bias ({selected_sport})",
+                xaxis_title="Avg Total Margin (Positive = OVER bias)",
+                yaxis_title="",
+                height=max(400, top_n * 25),
+                yaxis=dict(autorange="reversed")
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
+
+            st.caption("""
+            **How to read this chart:**
+            - **Positive margin**: Games average this many points OVER the total → look for OVER bets
+            - **Negative margin**: Games average this many points UNDER the total → look for UNDER bets
+            """)
 
     # Interpretation guide
     with st.expander("📖 How to Use Power Rankings"):

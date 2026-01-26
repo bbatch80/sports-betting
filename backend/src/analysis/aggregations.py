@@ -17,6 +17,10 @@ from .metrics import (
     time_series_ats,
     team_ats_cover_rate,
     team_ats_record,
+    ou_cover_rate,
+    ou_record,
+    team_ou_cover_rate,
+    team_ou_record,
 )
 
 
@@ -227,6 +231,204 @@ def micro_all_teams(
     df = pd.DataFrame(results)
     if len(df) > 0:
         df = df.sort_values('ats_pct', ascending=False)
+
+    return df
+
+
+# =============================================================================
+# Over/Under (Totals) Aggregations
+# =============================================================================
+
+def macro_ou_summary(
+    df: pd.DataFrame,
+    handicaps: List[int] = None
+) -> pd.DataFrame:
+    """
+    Generate macro (league-wide) O/U summary.
+
+    Returns DataFrame with over and under rates at various handicaps.
+    """
+    if handicaps is None:
+        handicaps = [0, 3, 5, 7, 10, 13, 15, 17, 20]
+
+    # Filter games with totals data
+    valid = df[df['total_result'].notna()] if 'total_result' in df.columns else pd.DataFrame()
+    if len(valid) == 0:
+        return pd.DataFrame()
+
+    results = []
+    for h in handicaps:
+        over_w, over_l, over_p = ou_record(valid, handicap=h, direction='over')
+        under_w, under_l, under_p = ou_record(valid, handicap=h, direction='under')
+
+        total_games = over_w + over_l + over_p
+
+        results.append({
+            'handicap': h,
+            'games': total_games,
+            'over_wins': over_w,
+            'over_losses': over_l,
+            'over_pushes': over_p,
+            'over_pct': over_w / total_games if total_games > 0 else 0,
+            'under_wins': under_w,
+            'under_losses': under_l,
+            'under_pushes': under_p,
+            'under_pct': under_w / total_games if total_games > 0 else 0,
+        })
+
+    return pd.DataFrame(results)
+
+
+def macro_ou_time_series(
+    df: pd.DataFrame,
+    handicap: float = 0,
+    direction: str = 'over'
+) -> pd.DataFrame:
+    """
+    Generate time series of O/U cover rate (league-wide).
+
+    Returns DataFrame with: game_date, games, covers, cover_pct
+    """
+    if len(df) == 0 or 'total_result' not in df.columns:
+        return pd.DataFrame(columns=['game_date', 'games', 'covers', 'cover_pct'])
+
+    valid = df[df['total_result'].notna()].copy()
+    if len(valid) == 0:
+        return pd.DataFrame(columns=['game_date', 'games', 'covers', 'cover_pct'])
+
+    valid = valid.sort_values('game_date')
+
+    if direction == 'over':
+        valid['covered'] = (valid['total_result'] + handicap) > 0
+    else:  # under
+        valid['covered'] = (valid['total_result'] - handicap) < 0
+
+    # Group by date
+    daily = valid.groupby('game_date').agg(
+        games=('covered', 'count'),
+        covers=('covered', 'sum')
+    ).reset_index()
+
+    # Cumulative
+    daily['games'] = daily['games'].cumsum()
+    daily['covers'] = daily['covers'].cumsum()
+    daily['cover_pct'] = daily['covers'] / daily['games']
+
+    return daily
+
+
+def macro_ou_by_total_bucket(
+    df: pd.DataFrame,
+    buckets: List[tuple] = None
+) -> pd.DataFrame:
+    """
+    Analyze O/U performance by closing total buckets.
+
+    Args:
+        df: Games DataFrame
+        buckets: List of (min, max, label) tuples for total ranges
+
+    Returns:
+        DataFrame with O/U stats per bucket
+    """
+    if 'closing_total' not in df.columns or 'total_result' not in df.columns:
+        return pd.DataFrame()
+
+    valid = df[df['total_result'].notna() & df['closing_total'].notna()]
+    if len(valid) == 0:
+        return pd.DataFrame()
+
+    if buckets is None:
+        # Default buckets based on typical NBA/NFL totals
+        buckets = [
+            (0, 199, 'Low (<200)'),
+            (199.5, 219, 'Mid-Low (200-219)'),
+            (219.5, 229, 'Average (220-229)'),
+            (229.5, 239, 'Mid-High (230-239)'),
+            (239.5, 500, 'High (240+)'),
+        ]
+
+    results = []
+    for bucket in buckets:
+        min_total, max_total, label = bucket
+        subset = valid[(valid['closing_total'] >= min_total) & (valid['closing_total'] <= max_total)]
+
+        if len(subset) == 0:
+            continue
+
+        over_w, over_l, over_p = ou_record(subset, handicap=0, direction='over')
+
+        results.append({
+            'bucket': label,
+            'min_total': min_total,
+            'max_total': max_total,
+            'games': len(subset),
+            'overs': over_w,
+            'unders': over_l,
+            'pushes': over_p,
+            'over_pct': over_w / len(subset) if len(subset) > 0 else 0,
+        })
+
+    return pd.DataFrame(results)
+
+
+def micro_ou_all_teams(
+    conn,
+    sport: str,
+    handicap: float = 0,
+    min_games: int = 5
+) -> pd.DataFrame:
+    """
+    Generate O/U summary for all teams in a sport.
+
+    Returns DataFrame with one row per team showing their O/U performance.
+
+    Optimized to load all games ONCE and filter in memory.
+    """
+    from ..database import get_games
+
+    # Load ALL games for this sport in ONE query
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0 or 'total_result' not in all_games.columns:
+        return pd.DataFrame()
+
+    # Filter games with totals data
+    all_games = all_games[all_games['total_result'].notna()]
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    results = []
+
+    for team in teams:
+        # Filter in memory - no database query
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < min_games:
+            continue
+
+        overs, unders, pushes = team_ou_record(team_games, handicap=handicap)
+        total = overs + unders + pushes
+
+        # Calculate average total_result (bias toward over or under)
+        avg_total_result = team_games['total_result'].mean()
+
+        results.append({
+            'team': team,
+            'games': len(team_games),
+            'overs': overs,
+            'unders': unders,
+            'pushes': pushes,
+            'over_pct': overs / total if total > 0 else 0,
+            'avg_total_margin': avg_total_result,  # Positive = OVER bias
+        })
+
+    df = pd.DataFrame(results)
+    if len(df) > 0:
+        df = df.sort_values('over_pct', ascending=False)
 
     return df
 

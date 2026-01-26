@@ -6,7 +6,7 @@ and matches current team states to identify actionable betting opportunities.
 """
 
 from dataclasses import dataclass, asdict
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import pandas as pd
 import sqlite3
 
@@ -156,6 +156,151 @@ def detect_patterns(
     # Sort by absolute edge (strongest patterns first)
     return sorted(patterns, key=lambda p: abs(p.edge), reverse=True)
 
+
+# =============================================================================
+# Over/Under (Totals) Streaks
+# =============================================================================
+
+def detect_ou_streak(team_games: pd.DataFrame) -> Tuple[int, str]:
+    """
+    Detect a team's current O/U streak.
+
+    Args:
+        team_games: DataFrame of team's games with total_result column
+
+    Returns:
+        Tuple of (streak_length, 'OVER'|'UNDER')
+        Returns (0, 'OVER') if no games or no totals data
+    """
+    if len(team_games) == 0 or 'total_result' not in team_games.columns:
+        return (0, 'OVER')
+
+    # Filter games with totals data
+    valid = team_games[team_games['total_result'].notna()].copy()
+    if len(valid) == 0:
+        return (0, 'OVER')
+
+    # Sort by date descending (most recent first)
+    valid = valid.sort_values('game_date', ascending=False)
+
+    streak_length = 0
+    streak_type = None
+
+    for _, row in valid.iterrows():
+        total_result = row['total_result']
+
+        # Skip pushes (total_result == 0)
+        if total_result == 0:
+            continue
+
+        is_over = total_result > 0
+
+        if streak_type is None:
+            # First non-push game establishes streak type
+            streak_type = 'OVER' if is_over else 'UNDER'
+            streak_length = 1
+        elif (streak_type == 'OVER') == is_over:
+            # Streak continues
+            streak_length += 1
+        else:
+            # Streak broken
+            break
+
+    return (streak_length, streak_type or 'OVER')
+
+
+def get_current_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+    """
+    Get each team's current O/U streak (live computation).
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+
+    Returns:
+        Dictionary mapping team name to streak info:
+        {team: {'streak_length': N, 'streak_type': 'OVER'|'UNDER'}}
+    """
+    # Fetch all games for this sport ONCE
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0 or 'total_result' not in all_games.columns:
+        return {}
+
+    # Filter games with totals data
+    all_games = all_games[all_games['total_result'].notna()]
+    if len(all_games) == 0:
+        return {}
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    streaks = {}
+
+    for team in teams:
+        # Filter games for this team in memory
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) == 0:
+            continue
+
+        streak_length, streak_type = detect_ou_streak(team_games)
+
+        if streak_length > 0:
+            streaks[team] = {
+                'streak_length': streak_length,
+                'streak_type': streak_type
+            }
+
+    return streaks
+
+
+def get_cached_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+    """
+    Get pre-computed O/U streaks from current_ou_streaks table.
+
+    Falls back to live computation if the table doesn't exist or is empty.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+
+    Returns:
+        Dictionary mapping team name to streak info:
+        {team: {'streak_length': N, 'streak_type': 'OVER'|'UNDER'}}
+    """
+    from sqlalchemy import text
+
+    query = text('''
+        SELECT team, streak_length, streak_type
+        FROM current_ou_streaks
+        WHERE sport = :sport
+    ''')
+
+    try:
+        result = conn.execute(query, {'sport': sport})
+        rows = result.fetchall()
+    except Exception:
+        # Table might not exist yet - fall back to live computation
+        return get_current_ou_streaks(conn, sport)
+
+    if not rows:
+        # Table is empty - fall back to live computation
+        return get_current_ou_streaks(conn, sport)
+
+    streaks = {}
+    for row in rows:
+        streaks[row[0]] = {
+            'streak_length': row[1] or 0,
+            'streak_type': row[2] or 'OVER',
+        }
+
+    return streaks
+
+
+# =============================================================================
+# ATS (Spread) Streaks
+# =============================================================================
 
 def get_current_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
     """

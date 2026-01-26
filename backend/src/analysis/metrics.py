@@ -16,6 +16,145 @@ import numpy as np
 from typing import Tuple, Optional, List
 
 
+# =============================================================================
+# Over/Under (Totals) Metrics
+# =============================================================================
+
+def ou_cover_rate(
+    df: pd.DataFrame,
+    handicap: float = 0,
+    direction: str = 'over'
+) -> float:
+    """
+    Calculate Over/Under cover rate at a handicap level.
+
+    Args:
+        df: DataFrame with total_result column
+        handicap: Points to add (for OVER) or subtract (for UNDER)
+        direction: 'over' or 'under'
+
+    Returns:
+        Cover rate as decimal (0.0 to 1.0)
+
+    Example:
+        # OVER hitting at 48%
+        rate = ou_cover_rate(games_df, handicap=0, direction='over')
+
+        # UNDER with 5pt cushion hitting at 60%
+        rate = ou_cover_rate(games_df, handicap=5, direction='under')
+    """
+    if len(df) == 0 or 'total_result' not in df.columns:
+        return 0.0
+
+    # Filter out games without totals data
+    valid = df[df['total_result'].notna()]
+    if len(valid) == 0:
+        return 0.0
+
+    if direction == 'over':
+        # OVER covers when total_result + handicap > 0
+        covers = (valid['total_result'] + handicap) > 0
+    else:  # under
+        # UNDER covers when total_result - handicap < 0
+        covers = (valid['total_result'] - handicap) < 0
+
+    return covers.mean()
+
+
+def ou_record(
+    df: pd.DataFrame,
+    handicap: float = 0,
+    direction: str = 'over'
+) -> Tuple[int, int, int]:
+    """
+    Calculate O/U record as (covers, non-covers, pushes).
+
+    Args:
+        df: DataFrame with total_result column
+        handicap: Points adjustment
+        direction: 'over' or 'under'
+
+    Returns:
+        Tuple of (covers, non-covers, pushes)
+    """
+    if len(df) == 0 or 'total_result' not in df.columns:
+        return (0, 0, 0)
+
+    # Filter out games without totals data
+    valid = df[df['total_result'].notna()]
+    if len(valid) == 0:
+        return (0, 0, 0)
+
+    if direction == 'over':
+        adjusted = valid['total_result'] + handicap
+        covers = (adjusted > 0).sum()
+        non_covers = (adjusted < 0).sum()
+        pushes = (adjusted == 0).sum()
+    else:  # under
+        adjusted = valid['total_result'] - handicap
+        covers = (adjusted < 0).sum()
+        non_covers = (adjusted > 0).sum()
+        pushes = (adjusted == 0).sum()
+
+    return (int(covers), int(non_covers), int(pushes))
+
+
+def team_ou_cover_rate(df: pd.DataFrame, handicap: float = 0) -> float:
+    """
+    Calculate O/U cover rate for a specific team's games.
+
+    For totals, there's no home/away distinction - the total is the same
+    regardless of which team's perspective we're viewing from.
+
+    Args:
+        df: DataFrame with total_result column (team's games)
+        handicap: Points to add (OVER covers if total_result + handicap > 0)
+
+    Returns:
+        OVER cover rate as decimal
+    """
+    if len(df) == 0 or 'total_result' not in df.columns:
+        return 0.0
+
+    valid = df[df['total_result'].notna()]
+    if len(valid) == 0:
+        return 0.0
+
+    # OVER covers when total_result + handicap > 0
+    covered = (valid['total_result'] + handicap) > 0
+    return float(covered.mean())
+
+
+def team_ou_record(df: pd.DataFrame, handicap: float = 0) -> Tuple[int, int, int]:
+    """
+    Calculate O/U record for a specific team's games.
+
+    Args:
+        df: DataFrame with total_result column
+        handicap: Points adjustment
+
+    Returns:
+        Tuple of (overs, unders, pushes)
+    """
+    if len(df) == 0 or 'total_result' not in df.columns:
+        return (0, 0, 0)
+
+    valid = df[df['total_result'].notna()]
+    if len(valid) == 0:
+        return (0, 0, 0)
+
+    adjusted = valid['total_result'] + handicap
+    overs = int((adjusted > 0).sum())
+    unders = int((adjusted < 0).sum())
+    pushes = int((adjusted == 0).sum())
+
+    return (overs, unders, pushes)
+
+
+# =============================================================================
+# ATS (Spread) Metrics
+# =============================================================================
+
 def ats_cover_rate(
     df: pd.DataFrame,
     handicap: float = 0,

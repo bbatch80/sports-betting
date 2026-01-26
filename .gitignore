@@ -31,6 +31,9 @@ wheels/
 .env
 .env.local
 
+# Notebooks with database credentials
+backend/notebooks/*_totals_analysis.ipynb
+
 # Local automation configs (may contain API keys)
 backend/automation/*.plist
 
