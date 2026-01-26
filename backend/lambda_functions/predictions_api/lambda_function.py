@@ -1,590 +1,367 @@
 """
 Lambda Function: Predictions API
-Serves predictions from S3 via API Gateway for mobile app consumption
+Serves today's games with team data for mobile app consumption.
+
+Simplified version - removed legacy strategy endpoints (elite-teams, strategy-performance).
+Mobile app will use same data model as Streamlit dashboard.
 """
 
 import json
 import boto3
 import logging
-import pandas as pd
-import io
+import os
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # AWS clients
-s3_client = boto3.client('s3')
+secrets_client = boto3.client('secretsmanager')
 
 # Configuration
-BUCKET_NAME = 'sports-betting-analytics-data'
 ALLOWED_SPORTS = ['nfl', 'nba', 'ncaam']
+DB_SECRET_NAME = 'sports-betting-db-credentials'
 
-# Sport-specific handicaps for strategies
-SPORT_HANDICAPS = {
-    'nfl': 5,
-    'nba': 9,
-    'ncaam': 10
-}
-
-# Strategy handicaps (for determining win/loss)
-STRATEGY_HANDICAPS = {
-    'home_focus': 11,
-    'away_focus': 11,
-    'elite_team_winpct': 11,
-    'elite_team_coverage': 11,
-    'hot_vs_cold_3': 11,
-    'hot_vs_cold_5': 11,
-    'hot_vs_cold_7': 11,
-    'opponent_perfect_form': 11,
-    'coverage_based': 0,
-    'common_opponent': 0,
-}
+# Database engine singleton
+_db_engine = None
 
 
-def normalize_team_name(name: str) -> str:
-    """Normalize team name for matching"""
-    if not name:
-        return ""
-    return name.lower().strip().replace(" ", "").replace("-", "").replace(".", "")
-
-
-def is_past_date(date_str: str) -> bool:
-    """Check if a date string is in the past"""
-    try:
-        # Use EST timezone
-        est = timezone(timedelta(hours=-5))
-        today = datetime.now(est).date()
-        check_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        return check_date < today
-    except Exception:
-        return False
-
-
-def get_results_for_date(sport_key: str, date_str: str) -> pd.DataFrame:
-    """
-    Get game results for a specific date from season results file
-    """
-    # Try Parquet first, then Excel
-    for file_format, read_func in [
-        (f"data/results/{sport_key}_season_results.parquet", lambda data: pd.read_parquet(io.BytesIO(data))),
-        (f"data/results/{sport_key}_season_results.xlsx", lambda data: pd.read_excel(io.BytesIO(data)))
-    ]:
-        try:
-            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=file_format)
-            df = read_func(response['Body'].read())
-
-            # Filter to completed games on this date
-            if 'game_date' in df.columns:
-                df['game_date'] = pd.to_datetime(df['game_date'])
-                target_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                df = df[df['game_date'].dt.date == target_date]
-
-            # Filter to games with scores
-            df = df[df['home_score'].notna() & df['away_score'].notna()]
-
-            logger.info(f"Found {len(df)} completed games for {sport_key} on {date_str}")
-            return df
-
-        except s3_client.exceptions.NoSuchKey:
-            continue
-        except Exception as e:
-            logger.error(f"Error reading results: {e}")
-            continue
-
-    return pd.DataFrame()
-
-
-def calculate_bet_result(home_score: float, away_score: float, closing_spread: float,
-                         bet_on_home: bool, handicap: float) -> str:
-    """
-    Calculate bet result (win/loss/push)
-
-    Args:
-        home_score: Final home team score
-        away_score: Final away team score
-        closing_spread: The closing spread (negative = home favored)
-        bet_on_home: True if betting on home team
-        handicap: Additional handicap points for the strategy
-
-    Returns:
-        'win', 'loss', or 'push'
-    """
-    actual_margin = home_score - away_score
-    spread_result = actual_margin + closing_spread
-
-    if bet_on_home:
-        # Home covers if spread_result > handicap
-        if spread_result > handicap:
-            return 'win'
-        elif spread_result < handicap:
-            return 'loss'
-        else:
-            return 'push'
-    else:
-        # Away covers if spread_result < -handicap
-        if spread_result < -handicap:
-            return 'win'
-        elif spread_result > -handicap:
-            return 'loss'
-        else:
-            return 'push'
-
-
-def merge_results_into_predictions(predictions_data: Dict, results_df: pd.DataFrame, sport_key: str) -> Dict:
-    """
-    Merge game results into predictions data
-    """
-    if results_df.empty:
-        return predictions_data
-
-    games = predictions_data.get('games', [])
-
-    for game in games:
-        home_team_pred = normalize_team_name(game.get('home_team', ''))
-        away_team_pred = normalize_team_name(game.get('away_team', ''))
-
-        # Find matching result
-        for _, result in results_df.iterrows():
-            home_team_result = normalize_team_name(str(result.get('home_team', '')))
-            away_team_result = normalize_team_name(str(result.get('away_team', '')))
-
-            if home_team_pred == home_team_result and away_team_pred == away_team_result:
-                # Add scores to game
-                game['home_score'] = int(result['home_score'])
-                game['away_score'] = int(result['away_score'])
-                game['closing_spread'] = float(result.get('closing_spread', game.get('current_spread', 0)))
-                game['game_completed'] = True
-
-                # Calculate result for recommended bet
-                # Determine which team was recommended based on coverage %
-                home_cov = game.get('home_cover_pct_handicap', 0)
-                away_cov = game.get('away_cover_pct_handicap', 0)
-                bet_on_home = home_cov >= away_cov
-
-                # Use sport-specific handicap for result calculation
-                handicap = SPORT_HANDICAPS.get(sport_key, 9)
-
-                game['bet_result'] = calculate_bet_result(
-                    game['home_score'],
-                    game['away_score'],
-                    game['closing_spread'],
-                    bet_on_home,
-                    handicap
-                )
-
-                break
-        else:
-            # No result found
-            game['game_completed'] = False
-
-    # Also merge into strategies if present
-    strategies = predictions_data.get('strategies', {})
-    for strategy_name, strategy_data in strategies.items():
-        opportunities = strategy_data.get('opportunities', [])
-        handicap = STRATEGY_HANDICAPS.get(strategy_name, 0)
-
-        for opp in opportunities:
-            home_team_pred = normalize_team_name(opp.get('home_team', ''))
-            away_team_pred = normalize_team_name(opp.get('away_team', ''))
-
-            for _, result in results_df.iterrows():
-                home_team_result = normalize_team_name(str(result.get('home_team', '')))
-                away_team_result = normalize_team_name(str(result.get('away_team', '')))
-
-                if home_team_pred == home_team_result and away_team_pred == away_team_result:
-                    opp['home_score'] = int(result['home_score'])
-                    opp['away_score'] = int(result['away_score'])
-                    opp['closing_spread'] = float(result.get('closing_spread', opp.get('spread', 0)))
-                    opp['game_completed'] = True
-
-                    # Determine bet direction from opportunity data
-                    bet_on = opp.get('bet_on', '')
-                    bet_on_home = normalize_team_name(bet_on) == home_team_pred
-
-                    opp['bet_result'] = calculate_bet_result(
-                        opp['home_score'],
-                        opp['away_score'],
-                        opp['closing_spread'],
-                        bet_on_home,
-                        handicap
-                    )
-                    break
-            else:
-                opp['game_completed'] = False
-
-    return predictions_data
-
-
-def get_strategy_performance_from_s3(sport_key: str) -> Dict[str, Any]:
-    """
-    Get strategy performance data from S3
-
-    Args:
-        sport_key: Sport key (nfl, nba, ncaam)
-
-    Returns:
-        Strategy performance data with cumulative win rates
-    """
-    s3_key = f"strategy_tracking/performance/{sport_key}_strategy_performance.json"
+def get_database_url() -> Optional[str]:
+    """Get DATABASE_URL from environment or Secrets Manager."""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        return database_url
 
     try:
-        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-        performance_data = json.loads(response['Body'].read().decode('utf-8'))
-        logger.info(f"Successfully retrieved strategy performance for {sport_key}")
-
-        # Transform for API response
-        strategies_response = {}
-        for strategy_name, strat in performance_data.get('strategies', {}).items():
-            # Calculate ROI (assuming -110 odds: win = +0.909, loss = -1)
-            wins = strat.get('total_wins', 0)
-            losses = strat.get('total_losses', 0)
-            total_bets = wins + losses
-
-            if total_bets > 0:
-                units_won = (wins * 0.909) - losses
-                roi = (units_won / total_bets) * 100
-            else:
-                units_won = 0
-                roi = 0
-
-            # Build chart data from daily_cumulative
-            chart_data = []
-            for daily in strat.get('daily_cumulative', []):
-                chart_data.append({
-                    'date': daily.get('date'),
-                    'rate': daily.get('cumulative_rate', 0)
-                })
-
-            strategies_response[strategy_name] = {
-                'name': strategy_name.replace('_', ' ').title(),
-                'total_predictions': strat.get('total_predictions', 0),
-                'wins': wins,
-                'losses': losses,
-                'pushes': strat.get('total_pushes', 0),
-                'win_rate': strat.get('current_win_rate', 0),
-                'roi': round(roi, 2),
-                'units_won': round(units_won, 2),
-                'current_streak': strat.get('current_streak', 0),
-                'streak_type': strat.get('streak_type'),
-                'chart_data': chart_data
-            }
-
-        return {
-            'sport': sport_key,
-            'sport_name': sport_key.upper(),
-            'strategies': strategies_response,
-            'last_updated': performance_data.get('last_updated'),
-            'season_start': performance_data.get('season_start')
-        }
-
-    except s3_client.exceptions.NoSuchKey:
-        logger.warning(f"No strategy performance found for {sport_key}")
-        return {
-            'sport': sport_key,
-            'sport_name': sport_key.upper(),
-            'strategies': {},
-            'error': 'No performance data available',
-            'message': f'Strategy performance for {sport_key.upper()} has not been tracked yet'
-        }
+        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
+        secret = json.loads(response['SecretString'])
+        return secret.get('url')
     except Exception as e:
-        logger.error(f"Error reading strategy performance from S3: {e}")
-        raise
+        logger.error(f"Could not retrieve DATABASE_URL: {e}")
+        return None
 
 
-def get_elite_teams_from_s3(sport_key: str = None) -> Dict[str, Any]:
+def get_db_engine():
+    """Get or create database engine singleton."""
+    global _db_engine
+    if _db_engine is None:
+        database_url = get_database_url()
+        if database_url:
+            _db_engine = create_engine(database_url, poolclass=NullPool)
+            logger.info("Database engine created")
+    return _db_engine
+
+
+def get_todays_games(sport: str) -> List[Dict[str, Any]]:
     """
-    Get elite team opportunities from predictions
+    Get today's games from database with team ratings and streaks.
 
-    Args:
-        sport_key: Optional sport key. If None, returns elite teams for all sports
+    Returns games in format compatible with Streamlit dashboard.
     """
-    sports_to_check = [sport_key] if sport_key else ALLOWED_SPORTS
+    engine = get_db_engine()
+    if not engine:
+        return []
 
-    elite_teams_data = {
-        'elite_teams': [],
-        'sports': {},
-        'summary': {
-            'total_opportunities': 0,
-            'sports_with_opportunities': 0
-        }
-    }
+    est = timezone(timedelta(hours=-5))
+    today = datetime.now(est).date()
 
-    for sport in sports_to_check:
-        s3_key = f"predictions/predictions_{sport}.json"
+    # Get today's games
+    games_query = text("""
+        SELECT sport, game_date, commence_time, home_team, away_team,
+               spread, spread_source, updated_at
+        FROM todays_games
+        WHERE sport = :sport AND game_date = :game_date
+        ORDER BY commence_time ASC
+    """)
 
-        try:
-            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-            predictions_data = json.loads(response['Body'].read().decode('utf-8'))
+    # Get current rankings for team tiers/ratings
+    rankings_query = text("""
+        SELECT team, win_rating, ats_rating, market_gap, win_rank, ats_rank,
+               win_record, ats_record, games_analyzed
+        FROM current_rankings
+        WHERE sport = :sport
+    """)
 
-            # Extract elite_team strategy
-            strategies = predictions_data.get('strategies', {})
-            elite_team_strategy = strategies.get('elite_team', {})
-            opportunities = elite_team_strategy.get('opportunities', [])
+    # Get current streaks
+    streaks_query = text("""
+        SELECT team, streak_length, streak_type
+        FROM current_streaks
+        WHERE sport = :sport
+    """)
 
-            if opportunities:
-                # Add sport name to each opportunity
-                for opp in opportunities:
-                    opp['sport'] = sport
-                    opp['sport_name'] = predictions_data.get('sport_name', sport.upper())
+    try:
+        with engine.connect() as conn:
+            # Fetch games
+            games_result = conn.execute(games_query, {'sport': sport.upper(), 'game_date': today})
+            games_rows = games_result.fetchall()
 
-                elite_teams_data['elite_teams'].extend(opportunities)
-                elite_teams_data['sports'][sport] = {
-                    'sport_name': predictions_data.get('sport_name', sport.upper()),
-                    'opportunities': opportunities,
-                    'prediction_date': predictions_data.get('prediction_date'),
-                    'summary': elite_team_strategy.get('summary', {})
+            # Fetch rankings into lookup
+            rankings_result = conn.execute(rankings_query, {'sport': sport.upper()})
+            rankings = {row[0]: {
+                'win_rating': row[1],
+                'ats_rating': row[2],
+                'market_gap': row[3],
+                'win_rank': row[4],
+                'ats_rank': row[5],
+                'win_record': row[6],
+                'ats_record': row[7],
+                'games_analyzed': row[8],
+                'tier': get_tier(row[2]) if row[2] else 'Unknown'
+            } for row in rankings_result.fetchall()}
+
+            # Fetch streaks into lookup
+            streaks_result = conn.execute(streaks_query, {'sport': sport.upper()})
+            streaks = {row[0]: {
+                'streak_length': row[1],
+                'streak_type': row[2]
+            } for row in streaks_result.fetchall()}
+
+            # Build games list with team data
+            games = []
+            for row in games_rows:
+                home_team = row[3]
+                away_team = row[4]
+
+                home_data = rankings.get(home_team, {})
+                away_data = rankings.get(away_team, {})
+                home_streak = streaks.get(home_team, {})
+                away_streak = streaks.get(away_team, {})
+
+                game = {
+                    'sport': row[0],
+                    'game_date': str(row[1]),
+                    'commence_time': row[2].isoformat() if hasattr(row[2], 'isoformat') else str(row[2]),
+                    'game_time': format_game_time(row[2]),
+                    'home_team': home_team,
+                    'away_team': away_team,
+                    'spread': float(row[5]) if row[5] else None,
+                    'spread_source': row[6],
+
+                    # Home team data
+                    'home_tier': home_data.get('tier', 'Unknown'),
+                    'home_ats_rating': home_data.get('ats_rating'),
+                    'home_win_rating': home_data.get('win_rating'),
+                    'home_market_gap': home_data.get('market_gap'),
+                    'home_ats_rank': home_data.get('ats_rank'),
+                    'home_record': home_data.get('win_record'),
+                    'home_ats_record': home_data.get('ats_record'),
+                    'home_streak_length': home_streak.get('streak_length', 0),
+                    'home_streak_type': home_streak.get('streak_type'),
+
+                    # Away team data
+                    'away_tier': away_data.get('tier', 'Unknown'),
+                    'away_ats_rating': away_data.get('ats_rating'),
+                    'away_win_rating': away_data.get('win_rating'),
+                    'away_market_gap': away_data.get('market_gap'),
+                    'away_ats_rank': away_data.get('ats_rank'),
+                    'away_record': away_data.get('win_record'),
+                    'away_ats_record': away_data.get('ats_record'),
+                    'away_streak_length': away_streak.get('streak_length', 0),
+                    'away_streak_type': away_streak.get('streak_type'),
                 }
-                elite_teams_data['summary']['sports_with_opportunities'] += 1
-                elite_teams_data['summary']['total_opportunities'] += len(opportunities)
-            else:
-                elite_teams_data['sports'][sport] = {
-                    'sport_name': predictions_data.get('sport_name', sport.upper()),
-                    'opportunities': [],
-                    'prediction_date': predictions_data.get('prediction_date'),
-                    'summary': elite_team_strategy.get('summary', {})
-                }
+                games.append(game)
 
-        except s3_client.exceptions.NoSuchKey:
-            logger.info(f"No predictions found for {sport}")
-            elite_teams_data['sports'][sport] = {
-                'opportunities': [],
-                'error': 'No predictions available'
-            }
-        except Exception as e:
-            logger.error(f"Error reading elite teams for {sport}: {e}")
-            elite_teams_data['sports'][sport] = {
-                'opportunities': [],
-                'error': str(e)
-            }
+            return games
 
-    # Sort all elite teams by last 5 spread performance (best first)
-    elite_teams_data['elite_teams'].sort(
-        key=lambda x: x.get('elite_team_last_5_spread') or 0,
-        reverse=True
-    )
-
-    return elite_teams_data
+    except Exception as e:
+        logger.error(f"Error fetching games: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
 
 
-def get_predictions_from_s3(sport_key: str, date: str = None) -> Dict[str, Any]:
-    """
-    Read predictions JSON from S3
-
-    Args:
-        sport_key: Sport key (nfl, nba, ncaam)
-        date: Optional date in YYYY-MM-DD format. If provided, looks for predictions_{sport}_{date}.json
-              If not provided, looks for predictions_{sport}.json (today's predictions)
-    """
-    predictions_data = None
-    is_past = date and is_past_date(date)
-
-    if date:
-        # Try date-specific predictions first
-        s3_key = f"predictions/predictions_{sport_key}_{date}.json"
-        try:
-            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-            predictions_data = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Successfully retrieved predictions for {sport_key} on {date}")
-        except s3_client.exceptions.NoSuchKey:
-            logger.info(f"No date-specific predictions found for {sport_key} on {date}")
-            # For past dates, don't fall back to today's predictions
-            if is_past:
-                return {
-                    'sport': sport_key,
-                    'prediction_date': date,
-                    'error': 'No predictions available',
-                    'message': f'No predictions were recorded for {sport_key.upper()} on {date}',
-                    'games': [],
-                    'has_results': False
-                }
-            # For today, fall through to default file
-
-    # If no date-specific predictions found, try default (today's)
-    if predictions_data is None:
-        s3_key = f"predictions/predictions_{sport_key}.json"
-        try:
-            response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_key)
-            predictions_data = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Successfully retrieved predictions for {sport_key}")
-        except s3_client.exceptions.NoSuchKey:
-            logger.warning(f"No predictions found for {sport_key}")
-            return {
-                'sport': sport_key,
-                'error': 'No predictions available',
-                'message': f'Predictions for {sport_key.upper()} are not yet available'
-            }
-        except Exception as e:
-            logger.error(f"Error reading predictions from S3: {e}")
-            raise
-
-    # If date is in the past, merge game results into predictions
-    if date and is_past_date(date):
-        try:
-            results_df = get_results_for_date(sport_key, date)
-            if not results_df.empty:
-                predictions_data = merge_results_into_predictions(predictions_data, results_df, sport_key)
-                predictions_data['has_results'] = True
-                logger.info(f"Merged {len(results_df)} results into predictions for {sport_key} on {date}")
-            else:
-                predictions_data['has_results'] = False
-                logger.info(f"No results found to merge for {sport_key} on {date}")
-        except Exception as e:
-            logger.error(f"Error merging results: {e}")
-            predictions_data['has_results'] = False
+def get_tier(ats_rating: float) -> str:
+    """Determine team tier based on ATS rating."""
+    if ats_rating is None:
+        return 'Unknown'
+    if ats_rating >= 0.6:
+        return 'Elite'
+    elif ats_rating >= 0.5:
+        return 'Good'
+    elif ats_rating >= 0.4:
+        return 'Average'
     else:
-        predictions_data['has_results'] = False
-
-    return predictions_data
+        return 'Poor'
 
 
-def create_response(status_code: int, body: Dict[str, Any], cors_headers: Dict[str, str] = None) -> Dict[str, Any]:
-    """Create API Gateway response with CORS headers"""
-    if cors_headers is None:
-        cors_headers = {
+def format_game_time(commence_time) -> str:
+    """Format commence time to readable EST string."""
+    try:
+        est = timezone(timedelta(hours=-5))
+        if hasattr(commence_time, 'astimezone'):
+            event_time_est = commence_time.astimezone(est)
+        else:
+            return str(commence_time)
+        return event_time_est.strftime('%I:%M %p EST')
+    except Exception:
+        return 'TBD'
+
+
+def get_historical_results(sport: str, start_date: str = None, end_date: str = None) -> List[Dict[str, Any]]:
+    """Get historical game results from database."""
+    engine = get_db_engine()
+    if not engine:
+        return []
+
+    query = """
+        SELECT game_date, home_team, away_team, closing_spread,
+               home_score, away_score, spread_result
+        FROM games
+        WHERE sport = :sport
+    """
+    params = {'sport': sport.upper()}
+
+    if start_date:
+        query += " AND game_date >= :start_date"
+        params['start_date'] = start_date
+    if end_date:
+        query += " AND game_date <= :end_date"
+        params['end_date'] = end_date
+
+    query += " ORDER BY game_date DESC LIMIT 100"
+
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text(query), params)
+            rows = result.fetchall()
+
+            games = []
+            for row in rows:
+                games.append({
+                    'game_date': str(row[0]),
+                    'home_team': row[1],
+                    'away_team': row[2],
+                    'closing_spread': float(row[3]) if row[3] else None,
+                    'home_score': int(row[4]) if row[4] else None,
+                    'away_score': int(row[5]) if row[5] else None,
+                    'spread_result': float(row[6]) if row[6] else None,
+                })
+            return games
+    except Exception as e:
+        logger.error(f"Error fetching results: {e}")
+        return []
+
+
+def create_response(status_code: int, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Create API Gateway response with CORS headers."""
+    return {
+        'statusCode': status_code,
+        'headers': {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Headers': 'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token',
             'Access-Control-Allow-Methods': 'GET,OPTIONS',
             'Content-Type': 'application/json'
-        }
-    
-    return {
-        'statusCode': status_code,
-        'headers': cors_headers,
+        },
         'body': json.dumps(body, default=str)
     }
 
 
 def lambda_handler(event, context):
     """
-    Lambda handler for API Gateway requests
-    
-    Event structure from API Gateway:
-    {
-        'path': '/api/predictions/nfl',
-        'httpMethod': 'GET',
-        'pathParameters': {...},
-        'queryStringParameters': {...},
-        ...
-    }
+    Lambda handler for API Gateway requests.
+
+    Endpoints:
+        GET /api/games/{sport} - Today's games with team data
+        GET /api/games/all - All sports today
+        GET /api/results/{sport} - Historical results
     """
     logger.info(f"Received request: {event.get('httpMethod')} {event.get('path')}")
-    
+
     try:
         # Handle OPTIONS request (CORS preflight)
         if event.get('httpMethod') == 'OPTIONS':
             return create_response(200, {'message': 'OK'})
-        
-        # Extract sport from path
+
         path = event.get('path', '')
         path_parts = [p for p in path.split('/') if p]
-        
-        # Check for strategy-performance endpoint: /api/strategy-performance/{sport}
-        if 'strategy-performance' in path_parts:
-            perf_idx = path_parts.index('strategy-performance')
-            # Sport is required for this endpoint
-            if len(path_parts) > perf_idx + 1:
-                sport = path_parts[perf_idx + 1].lower()
-                if sport not in ALLOWED_SPORTS:
-                    return create_response(400, {
-                        'error': 'Invalid sport',
-                        'message': f'Valid sports are: {", ".join(ALLOWED_SPORTS)}',
-                        'received': sport
-                    })
-                performance = get_strategy_performance_from_s3(sport)
-                return create_response(200, performance)
+        query_params = event.get('queryStringParameters') or {}
+
+        # Determine endpoint type and sport
+        endpoint_type = 'games'  # default
+        if 'results' in path_parts:
+            endpoint_type = 'results'
+        elif 'games' in path_parts:
+            endpoint_type = 'games'
+        elif 'predictions' in path_parts:
+            # Legacy endpoint - treat as games
+            endpoint_type = 'games'
+
+        # Extract sport
+        sport = None
+        for part in path_parts:
+            if part.lower() in ALLOWED_SPORTS:
+                sport = part.lower()
+                break
+            elif part.lower() == 'all':
+                sport = 'all'
+                break
+
+        # Handle requests
+        if endpoint_type == 'games':
+            if sport == 'all':
+                # Return all sports
+                all_games = {}
+                for sp in ALLOWED_SPORTS:
+                    games = get_todays_games(sp)
+                    all_games[sp] = {
+                        'sport': sp,
+                        'sport_name': sp.upper(),
+                        'games': games,
+                        'game_count': len(games)
+                    }
+                return create_response(200, {
+                    'message': "Today's games for all sports",
+                    'sports': all_games
+                })
+            elif sport:
+                games = get_todays_games(sport)
+                return create_response(200, {
+                    'sport': sport,
+                    'sport_name': sport.upper(),
+                    'games': games,
+                    'game_count': len(games),
+                    'date': datetime.now(timezone(timedelta(hours=-5))).strftime('%Y-%m-%d')
+                })
             else:
                 return create_response(400, {
                     'error': 'Sport required',
-                    'message': f'Please specify a sport: /api/strategy-performance/{{sport}}',
-                    'valid_sports': ALLOWED_SPORTS
+                    'message': f'Valid sports: {", ".join(ALLOWED_SPORTS)}'
                 })
 
-        # Check for elite-teams endpoint: /api/elite-teams or /api/elite-teams/{sport}
-        if 'elite-teams' in path_parts:
-            elite_idx = path_parts.index('elite-teams')
-            # Check if a specific sport is requested
-            sport = None
-            if len(path_parts) > elite_idx + 1:
-                sport = path_parts[elite_idx + 1].lower()
-                if sport not in ALLOWED_SPORTS:
-                    return create_response(400, {
-                        'error': 'Invalid sport',
-                        'message': f'Valid sports are: {", ".join(ALLOWED_SPORTS)}',
-                        'received': sport
-                    })
+        elif endpoint_type == 'results':
+            if not sport or sport == 'all':
+                return create_response(400, {
+                    'error': 'Sport required for results',
+                    'message': f'Valid sports: {", ".join(ALLOWED_SPORTS)}'
+                })
 
-            elite_teams = get_elite_teams_from_s3(sport)
-            return create_response(200, elite_teams)
-
-        # Determine which sport(s) to return
-        if 'all' in path_parts or (len(path_parts) >= 3 and path_parts[2] == 'all'):
-            # Return all predictions
-            all_predictions = {}
-            for sport in ALLOWED_SPORTS:
-                try:
-                    all_predictions[sport] = get_predictions_from_s3(sport)
-                except Exception as e:
-                    logger.error(f"Error getting {sport} predictions: {e}")
-                    all_predictions[sport] = {
-                        'sport': sport,
-                        'error': str(e)
-                    }
+            start_date = query_params.get('start_date')
+            end_date = query_params.get('end_date')
+            results = get_historical_results(sport, start_date, end_date)
 
             return create_response(200, {
-                'message': 'All predictions',
-                'predictions': all_predictions
+                'sport': sport,
+                'sport_name': sport.upper(),
+                'games': results,
+                'game_count': len(results)
             })
 
-        # Extract sport from path (e.g., /api/predictions/nfl)
-        sport = None
-        if len(path_parts) >= 3:
-            sport = path_parts[2].lower()
-        elif 'pathParameters' in event and event['pathParameters']:
-            # Try to get from path parameters
-            sport = event['pathParameters'].get('sport', '').lower()
-        
-        # Validate sport
-        if not sport or sport not in ALLOWED_SPORTS:
-            return create_response(400, {
-                'error': 'Invalid sport',
-                'message': f'Valid sports are: {", ".join(ALLOWED_SPORTS)}',
-                'received': sport
-            })
-        
-        # Get date from query parameters if provided
-        query_params = event.get('queryStringParameters') or {}
-        date = query_params.get('date')  # Format: YYYY-MM-DD
-        
-        # Validate date format if provided
-        if date:
-            try:
-                from datetime import datetime
-                datetime.strptime(date, '%Y-%m-%d')
-            except ValueError:
-                return create_response(400, {
-                    'error': 'Invalid date format',
-                    'message': 'Date must be in YYYY-MM-DD format',
-                    'received': date
-                })
-        
-        # Get predictions for the requested sport and date
-        predictions = get_predictions_from_s3(sport, date)
-        
-        # Return predictions
-        return create_response(200, predictions)
-        
+        # Unknown endpoint
+        return create_response(404, {
+            'error': 'Not found',
+            'message': 'Valid endpoints: /api/games/{sport}, /api/results/{sport}'
+        })
+
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         import traceback
         logger.error(traceback.format_exc())
-        
+
         return create_response(500, {
             'error': 'Internal server error',
             'message': str(e)
         })
-
-
-

@@ -181,32 +181,47 @@ def micro_all_teams(
     Generate ATS summary for all teams in a sport.
 
     Returns DataFrame with one row per team.
-    """
-    from ..database import get_all_teams, get_games
 
-    teams = get_all_teams(conn, sport=sport)
+    Optimized to load all games ONCE and filter in memory (avoids N+1 queries).
+    """
+    from ..database import get_games
+
+    # Load ALL games for this sport in ONE query
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
     results = []
 
     for team in teams:
-        games = get_games(conn, sport=sport, team=team)
-        if len(games) < min_games:
+        # Filter in memory - no database query
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < min_games:
             continue
 
-        home_games = games[games['is_home'] == True]
-        away_games = games[games['is_home'] == False]
+        # Add is_home column for this team's perspective
+        team_games['is_home'] = team_games['home_team'] == team
 
-        w, l, p = team_ats_record(games, handicap=handicap)
+        home_games = team_games[team_games['is_home'] == True]
+        away_games = team_games[team_games['is_home'] == False]
+
+        w, l, p = team_ats_record(team_games, handicap=handicap)
 
         results.append({
             'team': team,
-            'games': len(games),
+            'games': len(team_games),
             'home_games': len(home_games),
             'away_games': len(away_games),
             'ats_wins': w,
             'ats_losses': l,
             'ats_pushes': p,
             'ats_pct': w / (w + l + p) if (w + l + p) > 0 else 0,
-            'avg_margin': spread_margin_avg(games, perspective='home') if len(home_games) > len(away_games) else -spread_margin_avg(games, perspective='home'),
+            'avg_margin': spread_margin_avg(team_games, perspective='home') if len(home_games) > len(away_games) else -spread_margin_avg(team_games, perspective='home'),
         })
 
     df = pd.DataFrame(results)

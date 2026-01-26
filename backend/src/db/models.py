@@ -163,6 +163,162 @@ Index("idx_todays_games_sport_date", todays_games.c.sport, todays_games.c.game_d
 
 
 # =============================================================================
+# Current Rankings Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+current_rankings = Table(
+    "current_rankings",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Team identification
+    Column("sport", String(50), nullable=False),
+    Column("team", String(100), nullable=False),
+
+    # Power ratings
+    Column("win_rating", Float),
+    Column("ats_rating", Float),
+    Column("market_gap", Float),  # ats_rating - win_rating
+
+    # Rankings
+    Column("win_rank", Integer),
+    Column("ats_rank", Integer),
+
+    # Records
+    Column("win_record", String(20)),   # "18-7"
+    Column("ats_record", String(20)),   # "15-10"
+
+    # Context
+    Column("games_analyzed", Integer),
+    Column("is_reliable", Integer),  # 1 or 0 (boolean as int for SQLite compat)
+
+    # Timestamp
+    Column("computed_at", DateTime),
+
+    # Ensure one record per team per sport
+    UniqueConstraint("sport", "team", name="uq_current_ranking"),
+)
+
+# Index for efficient lookups
+Index("idx_current_rankings_sport", current_rankings.c.sport)
+
+
+# =============================================================================
+# Current Streaks Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+current_streaks = Table(
+    "current_streaks",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Team identification
+    Column("sport", String(50), nullable=False),
+    Column("team", String(100), nullable=False),
+
+    # Streak info
+    Column("streak_length", Integer),
+    Column("streak_type", String(10)),  # 'WIN' or 'LOSS'
+
+    # Timestamp
+    Column("computed_at", DateTime),
+
+    # Ensure one record per team per sport
+    UniqueConstraint("sport", "team", name="uq_current_streak"),
+)
+
+# Index for efficient lookups
+Index("idx_current_streaks_sport", current_streaks.c.sport)
+
+
+# =============================================================================
+# Detected Patterns Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+detected_patterns = Table(
+    "detected_patterns",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Pattern identification
+    Column("sport", String(50), nullable=False),
+    Column("pattern_type", String(20), nullable=False),  # 'streak_fade' or 'streak_ride'
+    Column("streak_type", String(10), nullable=False),   # 'WIN' or 'LOSS'
+    Column("streak_length", Integer, nullable=False),
+    Column("handicap", Integer, nullable=False),
+
+    # Statistics
+    Column("cover_rate", Float),
+    Column("baseline_rate", Float),
+    Column("edge", Float),
+    Column("sample_size", Integer),
+    Column("confidence", String(10)),  # 'high', 'medium', 'low'
+
+    # Timestamp
+    Column("computed_at", DateTime),
+
+    # Ensure one pattern per combination
+    UniqueConstraint(
+        "sport", "pattern_type", "streak_type", "streak_length", "handicap",
+        name="uq_detected_pattern"
+    ),
+)
+
+# Index for efficient lookups
+Index("idx_detected_patterns_sport", detected_patterns.c.sport)
+
+
+# =============================================================================
+# Today's Recommendations Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+todays_recommendations = Table(
+    "todays_recommendations",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Game identification
+    Column("sport", String(50), nullable=False),
+    Column("game_date", Date, nullable=False),
+    Column("home_team", String(100), nullable=False),
+    Column("away_team", String(100), nullable=False),
+    Column("game_time", String(50)),
+
+    # Spread info
+    Column("spread", Float),
+    Column("spread_source", String(100)),
+
+    # Team tiers and ratings
+    Column("home_tier", String(20)),
+    Column("away_tier", String(20)),
+    Column("home_ats_rating", Float),
+    Column("away_ats_rating", Float),
+
+    # Streak info
+    Column("home_streak_length", Integer),
+    Column("home_streak_type", String(10)),
+    Column("away_streak_length", Integer),
+    Column("away_streak_type", String(10)),
+
+    # Recommendations stored as JSON
+    Column("recommendations_json", String(4000)),  # JSON array of BetRecommendation objects
+
+    # Timestamp
+    Column("computed_at", DateTime),
+
+    # Ensure one record per game per day
+    UniqueConstraint("sport", "game_date", "home_team", "away_team", name="uq_todays_recommendation"),
+)
+
+# Index for efficient lookups
+Index("idx_todays_rec_sport_date", todays_recommendations.c.sport, todays_recommendations.c.game_date)
+
+
+# =============================================================================
 # Schema Management
 # =============================================================================
 

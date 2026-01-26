@@ -1,7 +1,6 @@
 # Lambda Function Dependencies
 # Note: boto3 is provided by AWS Lambda runtime, don't include it
 
-# For reading results files (parquet and excel)
-pandas>=2.0.0
-pyarrow>=14.0.0
-openpyxl>=3.1.0
+# Database access
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.9

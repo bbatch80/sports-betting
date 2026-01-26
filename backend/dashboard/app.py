@@ -89,6 +89,7 @@ from src.analysis.network_ratings import (
 from src.analysis.tier_matchups import get_tier
 from src.analysis.todays_recommendations import (
     generate_recommendations,
+    get_cached_recommendations,
     get_combined_confidence,
     get_games_last_updated,
 )
@@ -778,15 +779,10 @@ def page_todays_picks():
 
     sport_to_use = picks_sport if picks_sport != "All" else "All"
 
-    # Generate recommendations (games fetched from database)
-    # Note: Passing empty list for tier_patterns - only streak-based recommendations
-    with st.spinner("Analyzing today's games..."):
-        game_recommendations = generate_recommendations(
-            conn,
-            sport_to_use,
-            patterns,
-            [],  # No tier matchup patterns - streak-based only
-        )
+    # Get pre-computed recommendations (fast - reads from cache table)
+    # Falls back to live computation if cache is empty
+    with st.spinner("Loading today's picks..."):
+        game_recommendations = get_cached_recommendations(conn, sport_to_use)
 
     # Filter to only games with detected edges
     games_with_edges = [g for g in game_recommendations if g.recommendations]

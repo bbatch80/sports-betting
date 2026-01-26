@@ -441,32 +441,19 @@ def create_api_gateway(apigw_client, api_name, predictions_lambda_arn, predictio
             api_resource_id = api_resource['id']
             print(f"  ✓ Created /api resource")
         
-        # Set up predictions endpoints
-        print(f"\n  Setting up predictions endpoints...")
+        # Set up games endpoints (new simplified API)
+        print(f"\n  Setting up games endpoints...")
+        setup_api_resource(
+            apigw_client, api_id, api_resource_id,
+            '/api/games/{sport}', 'games',
+            predictions_lambda_arn, predictions_function_name, api_name
+        )
+
+        # Legacy predictions endpoint (redirects to games)
+        print(f"\n  Setting up legacy predictions endpoint...")
         setup_api_resource(
             apigw_client, api_id, api_resource_id,
             '/api/predictions/{sport}', 'predictions',
-            predictions_lambda_arn, predictions_function_name, api_name
-        )
-
-        # Set up elite-teams endpoints (uses predictions Lambda)
-        print(f"\n  Setting up elite-teams endpoints...")
-        setup_api_resource(
-            apigw_client, api_id, api_resource_id,
-            '/api/elite-teams', 'elite-teams',
-            predictions_lambda_arn, predictions_function_name, api_name
-        )
-        setup_api_resource(
-            apigw_client, api_id, api_resource_id,
-            '/api/elite-teams/{sport}', 'elite-teams-sport',
-            predictions_lambda_arn, predictions_function_name, api_name
-        )
-
-        # Set up strategy-performance endpoint (uses predictions Lambda)
-        print(f"\n  Setting up strategy-performance endpoints...")
-        setup_api_resource(
-            apigw_client, api_id, api_resource_id,
-            '/api/strategy-performance/{sport}', 'strategy-performance',
             predictions_lambda_arn, predictions_function_name, api_name
         )
 
@@ -663,24 +650,17 @@ def main():
     print(f"✓ Results API Lambda function deployed: {RESULTS_API_FUNCTION_NAME}")
     print(f"✓ API Gateway created: {API_NAME}")
     print(f"\nAPI Endpoints:")
-    print(f"  Predictions:")
-    print(f"    {api_url}/api/predictions/nfl")
-    print(f"    {api_url}/api/predictions/nba")
-    print(f"    {api_url}/api/predictions/ncaam")
-    print(f"    {api_url}/api/predictions/all")
-    print(f"  Elite Teams:")
-    print(f"    {api_url}/api/elite-teams")
-    print(f"    {api_url}/api/elite-teams/nfl")
-    print(f"    {api_url}/api/elite-teams/nba")
-    print(f"    {api_url}/api/elite-teams/ncaam")
-    print(f"  Results:")
+    print(f"  Games (today's games with team data):")
+    print(f"    {api_url}/api/games/nfl")
+    print(f"    {api_url}/api/games/nba")
+    print(f"    {api_url}/api/games/ncaam")
+    print(f"    {api_url}/api/games/all")
+    print(f"  Results (historical):")
     print(f"    {api_url}/api/results/nfl")
     print(f"    {api_url}/api/results/nba")
     print(f"    {api_url}/api/results/ncaam")
-    print(f"    {api_url}/api/results/all")
     print(f"\nTest the APIs:")
-    print(f"  curl {api_url}/api/predictions/nba")
-    print(f"  curl {api_url}/api/elite-teams")
+    print(f"  curl {api_url}/api/games/nba")
     print(f"  curl {api_url}/api/results/nba")
     
     return 0

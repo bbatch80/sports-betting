@@ -1,0 +1,814 @@
+"""
+Lambda Function: Generate Current Rankings, Streaks, and Patterns
+Pre-computes team rankings, streaks, and betting patterns daily for fast dashboard loads.
+
+Triggered by: EventBridge schedule (daily at 6:20 AM EST, after generate_historical_ratings)
+
+This function:
+1. For each sport (NFL, NBA, NCAAM):
+   - Computes network-based ratings (win-based and ATS-based)
+   - Calculates win/ATS records for each team
+   - Computes current ATS streak for each team
+   - Detects profitable streak patterns across handicap levels
+2. Upserts results to current_rankings, current_streaks, and detected_patterns tables
+
+Performance benefit: Dashboard pages load in <100ms instead of 3-7 seconds.
+"""
+
+import json
+import boto3
+import os
+import math
+import logging
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Set, Tuple
+from sqlalchemy import create_engine, text
+from sqlalchemy.pool import NullPool
+
+# Configure logging for CloudWatch
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+# AWS clients
+secrets_client = boto3.client('secretsmanager')
+
+# Configuration
+DB_SECRET_NAME = 'sports-betting-db-credentials'
+SPORTS = ['NFL', 'NBA', 'NCAAM']
+MIN_GAMES = 5  # Minimum games for "reliable" rating
+
+# Rating algorithm config
+RATING_CONFIG = {
+    'decay': 0.92,
+    'margin_cap': 20,
+    'learning_rate': 0.03,
+    'tolerance': 0.0005,
+}
+
+ITERATIONS_BY_SPORT = {
+    'NFL': 100,
+    'NBA': 100,
+    'NCAAM': 150,
+}
+
+# Database engine singleton
+_db_engine = None
+
+
+def get_database_url() -> str:
+    """Get DATABASE_URL from environment or Secrets Manager."""
+    database_url = os.environ.get('DATABASE_URL')
+    if database_url:
+        return database_url
+
+    try:
+        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
+        secret = json.loads(response['SecretString'])
+        return secret.get('url')
+    except Exception as e:
+        logger.error(f"Could not retrieve DATABASE_URL: {e}")
+        return None
+
+
+def get_db_engine():
+    """Get or create database engine singleton."""
+    global _db_engine
+    if _db_engine is None:
+        database_url = get_database_url()
+        if database_url:
+            _db_engine = create_engine(database_url, poolclass=NullPool)
+            logger.info("Database engine created")
+    return _db_engine
+
+
+def get_games_for_sport(engine, sport: str) -> List[Dict[str, Any]]:
+    """Fetch all games for a sport from the database."""
+    query = text("""
+        SELECT game_date, home_team, away_team, home_score, away_score,
+               closing_spread, spread_result
+        FROM games
+        WHERE sport = :sport
+        ORDER BY game_date
+    """)
+
+    with engine.connect() as conn:
+        result = conn.execute(query, {'sport': sport})
+        games = [dict(row._mapping) for row in result]
+
+    return games
+
+
+def compute_network_ratings(
+    games: List[Dict[str, Any]],
+    mode: str = 'ats',
+    decay: float = 0.92,
+    margin_cap: float = 20,
+    max_iterations: int = 100,
+    learning_rate: float = 0.03,
+    tolerance: float = 0.0005
+) -> Dict[str, float]:
+    """Compute network-based team ratings using iterative strength propagation."""
+    if not games:
+        return {}
+
+    teams = set()
+    for g in games:
+        teams.add(g['home_team'])
+        teams.add(g['away_team'])
+
+    ratings = {team: 0.5 for team in teams}
+
+    if len(teams) == 0:
+        return ratings
+
+    if mode == 'ats':
+        valid_games = [g for g in games if g.get('spread_result') and g['spread_result'] != 0]
+    else:
+        valid_games = [g for g in games if g.get('home_score') is not None
+                      and g.get('away_score') is not None
+                      and g['home_score'] != g['away_score']]
+
+    if not valid_games:
+        return ratings
+
+    max_date = max(g['game_date'] for g in valid_games)
+    if isinstance(max_date, str):
+        from datetime import datetime as dt
+        max_date = dt.strptime(max_date, '%Y-%m-%d').date()
+
+    for iteration in range(max_iterations):
+        new_ratings = ratings.copy()
+
+        for game in valid_games:
+            if mode == 'ats':
+                home_won = game['spread_result'] > 0
+                margin = abs(game['spread_result'])
+            else:
+                home_won = game['home_score'] > game['away_score']
+                margin = abs(game['home_score'] - game['away_score'])
+
+            margin = min(margin, margin_cap)
+
+            winner = game['home_team'] if home_won else game['away_team']
+            loser = game['away_team'] if home_won else game['home_team']
+
+            winner_rating = ratings[winner]
+            loser_rating = ratings[loser]
+            total = winner_rating + loser_rating
+            expected = winner_rating / total if total > 0 else 0.5
+            surprise = 1 - expected
+
+            game_date = game['game_date']
+            if isinstance(game_date, str):
+                from datetime import datetime as dt
+                game_date = dt.strptime(game_date, '%Y-%m-%d').date()
+            days_ago = (max_date - game_date).days
+            recency_weight = decay ** (days_ago / 7)
+
+            adjustment = surprise * (margin / margin_cap) * learning_rate * recency_weight
+
+            new_ratings[winner] += adjustment
+            new_ratings[loser] -= adjustment
+
+        valid_values = [v for v in new_ratings.values() if math.isfinite(v)]
+        if len(valid_values) > 1:
+            mean_r = sum(valid_values) / len(valid_values)
+            std_r = (sum((v - mean_r) ** 2 for v in valid_values) / len(valid_values)) ** 0.5
+            if std_r > 0:
+                new_ratings = {
+                    t: 1 / (1 + math.exp(-max(-10, min(10, (r - mean_r) / std_r))))
+                    if math.isfinite(r) else 0.5
+                    for t, r in new_ratings.items()
+                }
+
+        max_change = max(abs(new_ratings[t] - ratings[t]) for t in teams)
+        if max_change < tolerance:
+            break
+
+        ratings = new_ratings
+
+    return ratings
+
+
+def get_team_record(games: List[Dict], team: str) -> str:
+    """Get win-loss record for a team."""
+    wins = 0
+    losses = 0
+
+    for g in games:
+        if g['home_team'] == team:
+            if g.get('home_score') is not None and g.get('away_score') is not None:
+                if g['home_score'] > g['away_score']:
+                    wins += 1
+                elif g['home_score'] < g['away_score']:
+                    losses += 1
+        elif g['away_team'] == team:
+            if g.get('home_score') is not None and g.get('away_score') is not None:
+                if g['away_score'] > g['home_score']:
+                    wins += 1
+                elif g['away_score'] < g['home_score']:
+                    losses += 1
+
+    return f"{wins}-{losses}"
+
+
+def get_team_ats_record(games: List[Dict], team: str) -> str:
+    """Get ATS record for a team (excluding pushes)."""
+    wins = 0
+    losses = 0
+
+    for g in games:
+        spread_result = g.get('spread_result')
+        if spread_result is None or spread_result == 0:
+            continue
+
+        if g['home_team'] == team:
+            if spread_result > 0:
+                wins += 1
+            else:
+                losses += 1
+        elif g['away_team'] == team:
+            if spread_result < 0:
+                wins += 1
+            else:
+                losses += 1
+
+    return f"{wins}-{losses}"
+
+
+def get_team_games_count(games: List[Dict], team: str) -> int:
+    """Get total games played by a team."""
+    count = 0
+    for g in games:
+        if g['home_team'] == team or g['away_team'] == team:
+            count += 1
+    return count
+
+
+def compute_current_streak(games: List[Dict], team: str) -> Tuple[int, str]:
+    """Compute current ATS streak for a team."""
+    team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
+
+    if not team_games:
+        return (0, 'WIN')
+
+    # Sort by date descending
+    from datetime import datetime as dt
+    def get_date(g):
+        d = g['game_date']
+        if isinstance(d, str):
+            return dt.strptime(d, '%Y-%m-%d').date()
+        return d
+
+    team_games.sort(key=get_date, reverse=True)
+
+    streak_length = 0
+    streak_type = None
+
+    for game in team_games:
+        is_home = game['home_team'] == team
+        spread_result = game.get('spread_result')
+
+        if spread_result is None or spread_result == 0:
+            continue
+
+        covered = (spread_result > 0) if is_home else (spread_result < 0)
+
+        if streak_type is None:
+            streak_type = 'WIN' if covered else 'LOSS'
+            streak_length = 1
+        elif (streak_type == 'WIN') == covered:
+            streak_length += 1
+        else:
+            break
+
+    return (streak_length, streak_type or 'WIN')
+
+
+def write_current_rankings(engine, sport: str, rankings_data: List[Dict], computed_at: datetime) -> int:
+    """Write current rankings to database."""
+    if not rankings_data:
+        return 0
+
+    upsert_sql = text("""
+        INSERT INTO current_rankings
+        (sport, team, win_rating, ats_rating, market_gap, win_rank, ats_rank,
+         win_record, ats_record, games_analyzed, is_reliable, computed_at)
+        VALUES (:sport, :team, :win_rating, :ats_rating, :market_gap, :win_rank, :ats_rank,
+                :win_record, :ats_record, :games_analyzed, :is_reliable, :computed_at)
+        ON CONFLICT (sport, team)
+        DO UPDATE SET
+            win_rating = EXCLUDED.win_rating,
+            ats_rating = EXCLUDED.ats_rating,
+            market_gap = EXCLUDED.market_gap,
+            win_rank = EXCLUDED.win_rank,
+            ats_rank = EXCLUDED.ats_rank,
+            win_record = EXCLUDED.win_record,
+            ats_record = EXCLUDED.ats_record,
+            games_analyzed = EXCLUDED.games_analyzed,
+            is_reliable = EXCLUDED.is_reliable,
+            computed_at = EXCLUDED.computed_at
+    """)
+
+    rows = []
+    for r in rankings_data:
+        rows.append({
+            'sport': sport,
+            'team': r['team'],
+            'win_rating': r['win_rating'],
+            'ats_rating': r['ats_rating'],
+            'market_gap': r['market_gap'],
+            'win_rank': r['win_rank'],
+            'ats_rank': r['ats_rank'],
+            'win_record': r['win_record'],
+            'ats_record': r['ats_record'],
+            'games_analyzed': r['games_analyzed'],
+            'is_reliable': 1 if r['is_reliable'] else 0,
+            'computed_at': computed_at,
+        })
+
+    with engine.begin() as conn:
+        conn.execute(upsert_sql, rows)
+
+    return len(rows)
+
+
+# =============================================================================
+# Pattern Detection
+# =============================================================================
+
+# Pattern detection config
+PATTERN_CONFIG = {
+    'min_sample': 30,
+    'min_edge': 0.05,
+    'streak_range': (2, 7),
+    'handicap_range': (0, 15),
+}
+
+
+def get_confidence(sample_size: int, edge: float) -> str:
+    """Determine confidence based on sample size and edge magnitude."""
+    abs_edge = abs(edge)
+    if sample_size >= 50 and abs_edge >= 0.08:
+        return 'high'
+    elif sample_size >= 30 and abs_edge >= 0.05:
+        return 'medium'
+    return 'low'
+
+
+def compute_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 15)) -> Dict[int, float]:
+    """Compute baseline cover rates at each handicap level."""
+    baseline = {}
+
+    for handicap in range(handicap_range[0], handicap_range[1] + 1):
+        covers = 0
+        total = 0
+
+        for g in games:
+            spread_result = g.get('spread_result')
+            if spread_result is None:
+                continue
+
+            # Home team cover at this handicap
+            home_covered = (spread_result + handicap) > 0
+            total += 1
+            if home_covered:
+                covers += 1
+
+        baseline[handicap] = covers / total if total > 0 else 0.5
+
+    return baseline
+
+
+def compute_streak_continuation(
+    games: List[Dict],
+    teams: Set[str],
+    streak_length: int,
+    streak_type: str,
+    handicap_range: Tuple[int, int] = (0, 15)
+) -> Dict[int, Tuple[int, int]]:
+    """
+    Compute cover counts at each handicap for games following a streak.
+
+    Returns: {handicap: (covers, total)}
+    """
+    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+
+    for team in teams:
+        team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
+        if len(team_games) < streak_length + 1:
+            continue
+
+        # Sort by date
+        from datetime import datetime as dt
+        def get_date(g):
+            d = g['game_date']
+            if isinstance(d, str):
+                return dt.strptime(d, '%Y-%m-%d').date()
+            return d
+
+        team_games.sort(key=get_date)
+
+        # Build game data
+        game_data = []
+        for g in team_games:
+            is_home = g['home_team'] == team
+            spread_result = g.get('spread_result')
+            if spread_result is None:
+                continue
+            covered_base = (spread_result > 0) if is_home else (spread_result < 0)
+            game_data.append({
+                'spread_result': spread_result,
+                'is_home': is_home,
+                'covered_base': covered_base
+            })
+
+        # Find situations matching streak criteria
+        target_covered = (streak_type == 'WIN')
+
+        for i in range(streak_length, len(game_data)):
+            # Check if there's a streak of exactly streak_length ending at i-1
+            streak_count = 0
+            for j in range(i - 1, -1, -1):
+                if game_data[j]['covered_base'] == target_covered:
+                    streak_count += 1
+                else:
+                    break
+                if streak_count >= streak_length:
+                    break
+
+            if streak_count >= streak_length:
+                # Game i is AFTER the streak - check coverage at each handicap
+                next_game = game_data[i]
+                is_home = next_game['is_home']
+                spread_result = next_game['spread_result']
+
+                for handicap in range(handicap_range[0], handicap_range[1] + 1):
+                    if is_home:
+                        covered = (spread_result + handicap) > 0
+                    else:
+                        covered = (spread_result - handicap) < 0
+
+                    results[handicap][1] += 1  # total
+                    if covered:
+                        results[handicap][0] += 1  # covers
+
+    return {h: tuple(v) for h, v in results.items()}
+
+
+def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
+    """Detect all significant streak patterns for a sport."""
+    cfg = PATTERN_CONFIG
+    patterns = []
+
+    teams = set()
+    for g in games:
+        teams.add(g['home_team'])
+        teams.add(g['away_team'])
+
+    # Compute baseline
+    baseline = compute_baseline_coverage(games, cfg['handicap_range'])
+
+    # Check each streak type and length
+    for streak_length in range(cfg['streak_range'][0], cfg['streak_range'][1] + 1):
+        for streak_type in ['WIN', 'LOSS']:
+            continuation = compute_streak_continuation(
+                games, teams, streak_length, streak_type, cfg['handicap_range']
+            )
+
+            for handicap in range(cfg['handicap_range'][0], cfg['handicap_range'][1] + 1):
+                covers, total = continuation[handicap]
+                if total < cfg['min_sample']:
+                    continue
+
+                cover_rate = covers / total
+                baseline_rate = baseline[handicap]
+                edge = cover_rate - baseline_rate
+
+                if abs(edge) < cfg['min_edge']:
+                    continue
+
+                pattern_type = 'streak_ride' if edge > 0 else 'streak_fade'
+
+                patterns.append({
+                    'sport': sport,
+                    'pattern_type': pattern_type,
+                    'streak_type': streak_type,
+                    'streak_length': streak_length,
+                    'handicap': handicap,
+                    'cover_rate': cover_rate,
+                    'baseline_rate': baseline_rate,
+                    'edge': edge,
+                    'sample_size': total,
+                    'confidence': get_confidence(total, edge),
+                })
+
+    return patterns
+
+
+def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime) -> int:
+    """Write detected patterns to database."""
+    if not patterns:
+        return 0
+
+    # Clear old patterns for these sports first
+    sports = set(p['sport'] for p in patterns)
+    delete_sql = text("DELETE FROM detected_patterns WHERE sport = :sport")
+
+    upsert_sql = text("""
+        INSERT INTO detected_patterns
+        (sport, pattern_type, streak_type, streak_length, handicap,
+         cover_rate, baseline_rate, edge, sample_size, confidence, computed_at)
+        VALUES (:sport, :pattern_type, :streak_type, :streak_length, :handicap,
+                :cover_rate, :baseline_rate, :edge, :sample_size, :confidence, :computed_at)
+        ON CONFLICT (sport, pattern_type, streak_type, streak_length, handicap)
+        DO UPDATE SET
+            cover_rate = EXCLUDED.cover_rate,
+            baseline_rate = EXCLUDED.baseline_rate,
+            edge = EXCLUDED.edge,
+            sample_size = EXCLUDED.sample_size,
+            confidence = EXCLUDED.confidence,
+            computed_at = EXCLUDED.computed_at
+    """)
+
+    rows = []
+    for p in patterns:
+        rows.append({
+            'sport': p['sport'],
+            'pattern_type': p['pattern_type'],
+            'streak_type': p['streak_type'],
+            'streak_length': p['streak_length'],
+            'handicap': p['handicap'],
+            'cover_rate': p['cover_rate'],
+            'baseline_rate': p['baseline_rate'],
+            'edge': p['edge'],
+            'sample_size': p['sample_size'],
+            'confidence': p['confidence'],
+            'computed_at': computed_at,
+        })
+
+    with engine.begin() as conn:
+        for sport in sports:
+            conn.execute(delete_sql, {'sport': sport})
+        if rows:
+            conn.execute(upsert_sql, rows)
+
+    return len(rows)
+
+
+def write_current_streaks(engine, sport: str, streaks_data: Dict[str, Tuple[int, str]], computed_at: datetime) -> int:
+    """Write current streaks to database."""
+    if not streaks_data:
+        return 0
+
+    upsert_sql = text("""
+        INSERT INTO current_streaks
+        (sport, team, streak_length, streak_type, computed_at)
+        VALUES (:sport, :team, :streak_length, :streak_type, :computed_at)
+        ON CONFLICT (sport, team)
+        DO UPDATE SET
+            streak_length = EXCLUDED.streak_length,
+            streak_type = EXCLUDED.streak_type,
+            computed_at = EXCLUDED.computed_at
+    """)
+
+    rows = []
+    for team, (length, stype) in streaks_data.items():
+        rows.append({
+            'sport': sport,
+            'team': team,
+            'streak_length': length,
+            'streak_type': stype,
+            'computed_at': computed_at,
+        })
+
+    with engine.begin() as conn:
+        conn.execute(upsert_sql, rows)
+
+    return len(rows)
+
+
+def process_sport(engine, sport: str, computed_at: datetime) -> Dict[str, Any]:
+    """Process rankings, streaks, and patterns for a single sport."""
+    logger.info(f"Processing {sport}...")
+
+    games = get_games_for_sport(engine, sport)
+    if not games:
+        logger.info(f"  No games found for {sport}")
+        return {'sport': sport, 'teams': 0, 'rankings': 0, 'streaks': 0, 'patterns': 0}
+
+    logger.info(f"  Found {len(games)} games")
+
+    # Get algorithm config
+    cfg = RATING_CONFIG.copy()
+    max_iterations = ITERATIONS_BY_SPORT.get(sport, 100)
+
+    # Compute ratings
+    win_ratings = compute_network_ratings(
+        games, mode='win',
+        decay=cfg['decay'],
+        margin_cap=cfg['margin_cap'],
+        max_iterations=max_iterations,
+        learning_rate=cfg['learning_rate'],
+        tolerance=cfg['tolerance']
+    )
+
+    ats_ratings = compute_network_ratings(
+        games, mode='ats',
+        decay=cfg['decay'],
+        margin_cap=cfg['margin_cap'],
+        max_iterations=max_iterations,
+        learning_rate=cfg['learning_rate'],
+        tolerance=cfg['tolerance']
+    )
+
+    # Get all teams
+    teams = set(win_ratings.keys()) | set(ats_ratings.keys())
+    logger.info(f"  Found {len(teams)} teams")
+
+    # Build rankings list
+    rankings = []
+    for team in teams:
+        games_count = get_team_games_count(games, team)
+        win_rating = win_ratings.get(team, 0.5)
+        ats_rating = ats_ratings.get(team, 0.5)
+
+        rankings.append({
+            'team': team,
+            'win_rating': win_rating,
+            'ats_rating': ats_rating,
+            'market_gap': ats_rating - win_rating,
+            'games_analyzed': games_count,
+            'win_record': get_team_record(games, team),
+            'ats_record': get_team_ats_record(games, team),
+            'is_reliable': games_count >= MIN_GAMES,
+        })
+
+    # Sort and assign win ranks
+    rankings.sort(key=lambda x: x['win_rating'], reverse=True)
+    for i, r in enumerate(rankings):
+        r['win_rank'] = i + 1
+
+    # Sort and assign ATS ranks
+    rankings.sort(key=lambda x: x['ats_rating'], reverse=True)
+    for i, r in enumerate(rankings):
+        r['ats_rank'] = i + 1
+
+    # Compute streaks
+    streaks = {}
+    for team in teams:
+        length, stype = compute_current_streak(games, team)
+        streaks[team] = (length, stype)
+
+    # Detect patterns
+    logger.info(f"  Detecting patterns...")
+    patterns = detect_patterns_for_sport(games, sport)
+    logger.info(f"  Found {len(patterns)} significant patterns")
+
+    # Write to database
+    rankings_written = write_current_rankings(engine, sport, rankings, computed_at)
+    streaks_written = write_current_streaks(engine, sport, streaks, computed_at)
+    patterns_written = write_detected_patterns(engine, patterns, computed_at)
+
+    logger.info(f"  Wrote {rankings_written} rankings, {streaks_written} streaks, {patterns_written} patterns")
+
+    return {
+        'sport': sport,
+        'teams': len(teams),
+        'rankings': rankings_written,
+        'streaks': streaks_written,
+        'patterns': patterns_written,
+    }
+
+
+def generate_todays_recommendations(engine, computed_at: datetime) -> int:
+    """
+    Generate and store today's betting recommendations.
+
+    This combines pattern detection with today's scheduled games to create
+    pre-computed recommendations that the dashboard can read instantly.
+    """
+    from datetime import timedelta
+
+    logger.info("Generating today's recommendations...")
+
+    # Get today's date in EST
+    est = timezone(timedelta(hours=-5))
+    today_est = datetime.now(est).date()
+
+    # Import recommendation functions (these are in the src package)
+    # We need to add src to path since Lambda packages differently
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+    try:
+        from src.analysis.todays_recommendations import generate_recommendations, write_todays_recommendations
+        from src.analysis.insights import get_cached_patterns
+    except ImportError as e:
+        logger.warning(f"Could not import recommendation modules: {e}")
+        return 0
+
+    # Get cached patterns (already computed by process_sport)
+    with engine.connect() as conn:
+        patterns = get_cached_patterns(conn, min_sample=30, min_edge=0.05)
+
+    logger.info(f"  Found {len(patterns)} cached patterns")
+
+    # Generate recommendations for all sports
+    all_recommendations = []
+    with engine.connect() as conn:
+        for sport in SPORTS:
+            try:
+                sport_recs = generate_recommendations(conn, sport, patterns, [])
+                all_recommendations.extend(sport_recs)
+                logger.info(f"  {sport}: {len(sport_recs)} games analyzed")
+            except Exception as e:
+                logger.warning(f"  Error generating recommendations for {sport}: {e}")
+
+    # Write to database
+    if all_recommendations:
+        written = write_todays_recommendations(engine, all_recommendations, today_est, computed_at)
+        logger.info(f"  Wrote {written} recommendations to cache")
+        return written
+    else:
+        logger.info("  No games scheduled today")
+        return 0
+
+
+def lambda_handler(event, context):
+    """Lambda entry point - generates current rankings, streaks, patterns, and recommendations."""
+    logger.info("=" * 60)
+    logger.info("Starting current rankings, streaks, patterns, and recommendations generation")
+    logger.info("=" * 60)
+
+    try:
+        engine = get_db_engine()
+        if engine is None:
+            raise Exception("Could not connect to database")
+
+        logger.info("Connected to database")
+
+        computed_at = datetime.now(timezone.utc)
+        results = []
+        total_rankings = 0
+        total_streaks = 0
+        total_patterns = 0
+
+        for sport in SPORTS:
+            try:
+                result = process_sport(engine, sport, computed_at)
+                results.append(result)
+                total_rankings += result['rankings']
+                total_streaks += result['streaks']
+                total_patterns += result['patterns']
+                logger.info(f"{sport}: {result['rankings']} rankings, {result['streaks']} streaks, {result['patterns']} patterns")
+            except Exception as e:
+                logger.error(f"Error processing {sport}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+
+        # Generate today's recommendations (uses patterns we just computed)
+        total_recommendations = 0
+        try:
+            total_recommendations = generate_todays_recommendations(engine, computed_at)
+        except Exception as e:
+            logger.error(f"Error generating recommendations: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        logger.info("=" * 60)
+        logger.info(f"COMPLETE: {total_rankings} rankings, {total_streaks} streaks, {total_patterns} patterns, {total_recommendations} recommendations")
+        logger.info("=" * 60)
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Current rankings, streaks, patterns, and recommendations generation complete',
+                'total_rankings': total_rankings,
+                'total_streaks': total_streaks,
+                'total_patterns': total_patterns,
+                'total_recommendations': total_recommendations,
+                'results': results,
+            })
+        }
+
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
+
+
+# For local testing
+if __name__ == '__main__':
+    if not os.environ.get('DATABASE_URL'):
+        print("Set DATABASE_URL environment variable for local testing")
+        print("Example: export DATABASE_URL='postgresql://user:pass@host:5432/dbname'")
+    else:
+        result = lambda_handler({}, None)
+        print(json.dumps(json.loads(result['body']), indent=2))
