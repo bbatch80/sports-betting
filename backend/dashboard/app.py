@@ -71,6 +71,10 @@ from src.analysis.metrics import (
     ou_record,
     team_ou_cover_rate,
     team_ou_record,
+    # O/U streak analysis
+    ou_streak_continuation_analysis,
+    baseline_ou_coverage,
+    ou_streak_summary_all_lengths,
 )
 from src.analysis.aggregations import (
     macro_ats_summary,
@@ -160,6 +164,24 @@ def cached_streak_summary(_conn, sport: str):
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
+def cached_ou_streak_summary(_conn, sport: str):
+    """Cached O/U streak summary for all lengths."""
+    return ou_streak_summary_all_lengths(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_ou_streak_continuation(_conn, sport: str, streak_length: int, streak_type: str):
+    """Cached O/U streak continuation analysis."""
+    return ou_streak_continuation_analysis(_conn, sport, streak_length, streak_type)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_baseline_ou_coverage(_conn, sport: str):
+    """Cached baseline O/U coverage."""
+    return baseline_ou_coverage(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_historical_ratings(_conn, sport: str) -> pd.DataFrame:
     """Cached historical ratings query for trajectory/momentum pages."""
     from sqlalchemy import text
@@ -242,7 +264,7 @@ st.sidebar.title("📊 Analytics Dashboard")
 # Navigation
 page = st.sidebar.radio(
     "Navigation",
-    ["🎲 Today's Picks", "🏆 Power Rankings", "📉 ATS Rating Trajectory", "📈 ATS Momentum", "🔥 Current Streaks", "Macro Trends", "Micro (Team) Analysis", "Streak Analysis", "Verification"]
+    ["🎲 Today's Picks", "🏆 Power Rankings", "🔥 Current Streaks", "League-Wide Trends", "Team Trends", "Streak Analysis", "Verification"]
 )
 
 st.sidebar.markdown("---")
@@ -258,19 +280,9 @@ if sports:
     date_range = get_date_range(conn, selected_sport)
     st.sidebar.caption(f"{count} games • {date_range[0]} to {date_range[1]}")
 
-# Debug timing toggle
-st.sidebar.markdown("---")
-if st.sidebar.checkbox("🔧 Show timing", value=False, key="timing_toggle"):
-    st.session_state['debug_timing'] = True
-    # Show DB latency when debug is enabled
-    latency = db_ping(conn)
-    st.sidebar.caption(f"DB latency: {latency:.1f}ms")
-else:
-    st.session_state['debug_timing'] = False
-
 
 # =============================================================================
-# Page: Macro Trends
+# Page: League-Wide Trends
 # =============================================================================
 
 def page_macro_trends():
@@ -1080,106 +1092,131 @@ def page_streak_analysis():
                 st.warning(f"No {streak_length}-game {streak_type} streaks found")
 
     # =========================================================================
-    # TOTALS STREAKS
+    # TOTALS STREAKS (O/U)
     # =========================================================================
     with streak_type_tabs[1]:
         st.markdown(f"""
-        **O/U Streaks:** Track which teams are on OVER or UNDER streaks for **{selected_sport}**.
+        **Question:** After a team goes OVER/UNDER X games in a row,
+        how does their next game perform across different handicaps (0-20 points)?
 
-        Teams on long OVER streaks may be good candidates for OVER bets (momentum), or UNDER bets (regression).
+        Select a streak length and type, then see O/U cover rates at every handicap level for **{selected_sport}**.
         """)
 
-        # Get current O/U streaks
-        with st.spinner("Loading O/U streaks..."):
-            ou_streaks = get_current_ou_streaks(conn, selected_sport)
+        # First, show available O/U streak data (cached)
+        with st.spinner("Loading O/U streak summary..."):
+            ou_summary = cached_ou_streak_summary(conn, selected_sport)
 
-        if not ou_streaks:
-            st.warning(f"No O/U streak data found for {selected_sport}")
+        if len(ou_summary) == 0:
+            st.warning("No O/U streak data found")
         else:
-            # Build streak data for display
-            streak_data = []
-            for team, info in ou_streaks.items():
-                streak_data.append({
-                    'team': team,
-                    'streak_length': info['streak_length'],
-                    'streak_type': info['streak_type'],
-                })
+            # Show summary table
+            st.subheader("Available O/U Streak Data")
 
-            streak_df = pd.DataFrame(streak_data)
-
-            # Summary
-            st.markdown("---")
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Teams with Streaks", len(streak_df))
-
-            over_streaks = streak_df[streak_df['streak_type'] == 'OVER']
-            under_streaks = streak_df[streak_df['streak_type'] == 'UNDER']
-            col2.metric("OVER Streaks", len(over_streaks))
-            col3.metric("UNDER Streaks", len(under_streaks))
-
-            # Display by streak type
-            st.markdown("---")
             col1, col2 = st.columns(2)
-
             with col1:
-                st.subheader("🟢 OVER Streaks")
-                if len(over_streaks) > 0:
-                    over_sorted = over_streaks.sort_values('streak_length', ascending=False)
-                    for _, row in over_sorted.iterrows():
-                        st.markdown(f"**{row['team']}**: {row['streak_length']}-game OVER streak")
-                else:
-                    st.info("No teams on OVER streaks")
+                st.markdown("**OVER Streaks**")
+                over_summary = ou_summary[ou_summary['streak_type'] == 'OVER'][['streak_length', 'situations']]
+                over_summary.columns = ['Streak Length', 'Situations']
+                st.dataframe(over_summary, hide_index=True)
 
             with col2:
-                st.subheader("🔴 UNDER Streaks")
-                if len(under_streaks) > 0:
-                    under_sorted = under_streaks.sort_values('streak_length', ascending=False)
-                    for _, row in under_sorted.iterrows():
-                        st.markdown(f"**{row['team']}**: {row['streak_length']}-game UNDER streak")
-                else:
-                    st.info("No teams on UNDER streaks")
+                st.markdown("**UNDER Streaks**")
+                under_summary = ou_summary[ou_summary['streak_type'] == 'UNDER'][['streak_length', 'situations']]
+                under_summary.columns = ['Streak Length', 'Situations']
+                st.dataframe(under_summary, hide_index=True)
 
-            # Streak distribution chart
+            # Select streak to analyze
             st.markdown("---")
-            st.subheader("O/U Streak Distribution")
+            st.subheader("Analyze O/U Coverage After Streak")
 
-            # Group by streak length and type
-            if len(streak_df) > 0:
-                fig = go.Figure()
+            col1, col2 = st.columns(2)
+            with col1:
+                ou_streak_length = st.selectbox("Streak Length", list(range(2, 11)), index=0, key="ou_streak_len")
+            with col2:
+                ou_streak_type = st.selectbox("Streak Type", ["OVER", "UNDER"], key="ou_streak_type")
 
-                for s_type, color in [('OVER', '#2ecc71'), ('UNDER', '#e74c3c')]:
-                    type_data = streak_df[streak_df['streak_type'] == s_type]
-                    if len(type_data) > 0:
-                        counts = type_data.groupby('streak_length').size().reset_index(name='count')
-                        fig.add_trace(go.Bar(
-                            name=s_type,
-                            x=counts['streak_length'],
-                            y=counts['count'],
-                            marker_color=color
-                        ))
+            # Check sample size
+            ou_selected_summary = ou_summary[(ou_summary['streak_length'] == ou_streak_length) & (ou_summary['streak_type'] == ou_streak_type)]
+            if len(ou_selected_summary) > 0:
+                ou_sample_size = ou_selected_summary['situations'].values[0]
+                st.info(f"Sample size: **{ou_sample_size}** situations where a team had a {ou_streak_length}-game {ou_streak_type} streak")
 
-                fig.update_layout(
-                    title=f"O/U Streak Length Distribution ({selected_sport})",
-                    xaxis_title="Streak Length (games)",
-                    yaxis_title="Number of Teams",
-                    barmode='group',
-                    height=400
-                )
+                # Run handicap analysis (cached for speed)
+                with st.spinner("Analyzing O/U handicap coverage..."):
+                    ou_handicap_data = cached_ou_streak_continuation(conn, selected_sport, ou_streak_length, ou_streak_type)
+                    ou_baseline_data = cached_baseline_ou_coverage(conn, selected_sport)
 
-                st.plotly_chart(fig, use_container_width=True)
+                if len(ou_handicap_data) > 0:
+                    # Merge baseline into handicap data
+                    ou_handicap_data = ou_handicap_data.merge(ou_baseline_data[['handicap', 'baseline_cover_pct']], on='handicap')
+                    ou_handicap_data['edge_vs_baseline'] = ou_handicap_data['cover_pct'] - ou_handicap_data['baseline_cover_pct']
 
-            # Full data table
-            with st.expander("View All O/U Streaks"):
-                display_df = streak_df.copy()
-                display_df['streak'] = display_df.apply(
-                    lambda r: f"{r['streak_length']}-game {r['streak_type']}",
-                    axis=1
-                )
-                st.dataframe(
-                    display_df[['team', 'streak_type', 'streak_length', 'streak']].sort_values('streak_length', ascending=False),
-                    hide_index=True,
-                    use_container_width=True
-                )
+                    # Chart: Cover rate by handicap with baseline comparison
+                    st.subheader(f"Next Game O/U Cover Rate by Handicap (After {ou_streak_length}-Game {ou_streak_type} Streak)")
+
+                    fig = go.Figure()
+
+                    # Bars for streak cover rate - color based on vs baseline
+                    fig.add_trace(go.Bar(
+                        name=f'After {ou_streak_length}-Game {ou_streak_type} Streak',
+                        x=ou_handicap_data['handicap'],
+                        y=ou_handicap_data['cover_pct'] * 100,
+                        marker_color=['#e74c3c' if edge < 0 else '#2ecc71' for edge in ou_handicap_data['edge_vs_baseline']],
+                        text=ou_handicap_data['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                        textposition='outside'
+                    ))
+
+                    # Baseline trend line
+                    fig.add_trace(go.Scatter(
+                        name=f'{selected_sport} Baseline',
+                        x=ou_baseline_data['handicap'],
+                        y=ou_baseline_data['baseline_cover_pct'] * 100,
+                        mode='lines+markers',
+                        line=dict(color='#3498db', width=3, dash='solid'),
+                        marker=dict(size=8)
+                    ))
+
+                    fig.update_layout(
+                        xaxis_title="Handicap (points added to total)",
+                        yaxis_title="OVER Cover Rate (%)",
+                        yaxis=dict(range=[0, 100]),
+                        height=500,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        barmode='overlay'
+                    )
+
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # Interpretation
+                    st.markdown(f"""
+                    **How to read this chart:**
+                    - **Bars** = OVER cover rate after a {ou_streak_length}-game {ou_streak_type} streak
+                    - **Blue line** = League-wide baseline OVER cover rate at each handicap
+                    - **Green bars** = streak situations OUTPERFORM the baseline (potential edge)
+                    - **Red bars** = streak situations UNDERPERFORM the baseline (fade opportunity)
+
+                    **Key insight:** Where the bars exceed the blue line, there may be a betting edge.
+                    """)
+
+                    # Data table
+                    with st.expander("View Data Table"):
+                        display = ou_handicap_data.copy()
+                        display['cover_pct_fmt'] = display['cover_pct'].apply(lambda x: f"{x:.1%}")
+                        display['baseline_fmt'] = display['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                        display['edge_fmt'] = display['edge_vs_baseline'].apply(lambda x: f"{x*100:+.1f}%")
+                        display = display.rename(columns={
+                            'handicap': 'Handicap',
+                            'covers': 'Covers',
+                            'total': 'Total',
+                            'cover_pct_fmt': 'Streak Cover %',
+                            'baseline_fmt': 'Baseline %',
+                            'edge_fmt': 'Edge vs Baseline'
+                        })
+                        st.dataframe(display[['Handicap', 'Total', 'Covers', 'Streak Cover %', 'Baseline %', 'Edge vs Baseline']], hide_index=True)
+                else:
+                    st.warning("No data found")
+            else:
+                st.warning(f"No {ou_streak_length}-game {ou_streak_type} streaks found")
 
 
 # =============================================================================
@@ -1705,342 +1742,6 @@ def calculate_team_slopes(df: pd.DataFrame, team: str) -> dict:
 
 
 # =============================================================================
-# Page: ATS Rating Trajectory
-# =============================================================================
-
-@timed
-def page_ats_trajectory():
-    """Visualize how team ATS ratings evolve over time."""
-    st.title("ATS Rating Trajectory")
-    st.markdown("Track how team ATS ratings change throughout the season. Do TOP teams stay TOP?")
-
-    # Controls
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="trajectory_sport")
-
-    # Use cached historical ratings query
-    df = cached_historical_ratings(conn, page_sport)
-
-    if df.empty:
-        st.warning(f"No historical ratings found for {page_sport}")
-        return
-
-    # Get list of teams
-    teams = sorted(df['team'].unique())
-
-    st.markdown("---")
-
-    # Team selector
-    col1, col2 = st.columns([2, 2])
-    with col1:
-        view_mode = st.radio("View Mode", ["Selected Teams", "All Teams (by current tier)"], horizontal=True)
-
-    if view_mode == "Selected Teams":
-        with col2:
-            selected_teams = st.multiselect(
-                "Select Teams to Compare",
-                teams,
-                default=teams[:5] if len(teams) >= 5 else teams,
-                key="trajectory_teams"
-            )
-
-        if not selected_teams:
-            st.info("Select at least one team to view their rating trajectory.")
-            return
-
-        plot_df = df[df['team'].isin(selected_teams)]
-
-        # Line chart
-        fig = go.Figure()
-
-        for team in selected_teams:
-            team_data = plot_df[plot_df['team'] == team].sort_values('snapshot_date')
-            fig.add_trace(go.Scatter(
-                x=team_data['snapshot_date'],
-                y=team_data['ats_rating'],
-                mode='lines',
-                name=team,
-                hovertemplate=f"{team}<br>Date: %{{x}}<br>ATS Rating: %{{y:.3f}}<extra></extra>"
-            ))
-
-        # Add tier boundary lines
-        fig.add_hline(y=0.70, line_dash="dash", line_color="green", annotation_text="TOP (0.70)")
-        fig.add_hline(y=0.55, line_dash="dash", line_color="blue", annotation_text="HIGH (0.55)")
-        fig.add_hline(y=0.45, line_dash="dash", line_color="gray", annotation_text="MID (0.45)")
-        fig.add_hline(y=0.30, line_dash="dash", line_color="orange", annotation_text="LOW (0.30)")
-
-        fig.update_layout(
-            title=f"{page_sport} ATS Rating Over Time",
-            xaxis_title="Date",
-            yaxis_title="ATS Rating",
-            yaxis=dict(range=[0, 1]),
-            height=500,
-            legend=dict(orientation="h", yanchor="bottom", y=-0.3)
-        )
-
-        st.plotly_chart(fig, width='stretch')
-
-    else:
-        # Show all teams grouped by current tier
-        latest_date = df['snapshot_date'].max()
-        latest_ratings = df[df['snapshot_date'] == latest_date].copy()
-        latest_ratings['tier'] = latest_ratings['ats_rating'].apply(get_tier)
-
-        selected_tier = st.selectbox("Filter by Current Tier", ['TOP', 'HIGH', 'MID', 'LOW', 'BOTTOM'], key="trajectory_tier")
-
-        tier_teams = latest_ratings[latest_ratings['tier'] == selected_tier]['team'].tolist()
-
-        if not tier_teams:
-            st.info(f"No teams currently in {selected_tier} tier")
-            return
-
-        st.caption(f"{len(tier_teams)} teams currently in {selected_tier} tier")
-
-        plot_df = df[df['team'].isin(tier_teams)]
-
-        fig = go.Figure()
-
-        for team in tier_teams:
-            team_data = plot_df[plot_df['team'] == team].sort_values('snapshot_date')
-            fig.add_trace(go.Scatter(
-                x=team_data['snapshot_date'],
-                y=team_data['ats_rating'],
-                mode='lines',
-                name=team,
-                opacity=0.7,
-                hovertemplate=f"{team}<br>Date: %{{x}}<br>ATS Rating: %{{y:.3f}}<extra></extra>"
-            ))
-
-        # Add tier boundary lines
-        fig.add_hline(y=0.70, line_dash="dash", line_color="green", annotation_text="TOP")
-        fig.add_hline(y=0.55, line_dash="dash", line_color="blue", annotation_text="HIGH")
-        fig.add_hline(y=0.45, line_dash="dash", line_color="gray", annotation_text="MID")
-        fig.add_hline(y=0.30, line_dash="dash", line_color="orange", annotation_text="LOW")
-
-        fig.update_layout(
-            title=f"{page_sport} ATS Rating Trajectory - Current {selected_tier} Tier Teams",
-            xaxis_title="Date",
-            yaxis_title="ATS Rating",
-            yaxis=dict(range=[0, 1]),
-            height=500,
-            showlegend=True if len(tier_teams) <= 15 else False
-        )
-
-        st.plotly_chart(fig, width='stretch')
-
-    # Summary stats
-    st.subheader("Rating Stability Analysis")
-
-    # Calculate volatility (std dev) for each team
-    volatility = df.groupby('team')['ats_rating'].agg(['std', 'mean', 'min', 'max']).reset_index()
-    volatility.columns = ['Team', 'Volatility (Std)', 'Mean Rating', 'Min Rating', 'Max Rating']
-    volatility['Range'] = volatility['Max Rating'] - volatility['Min Rating']
-    volatility = volatility.sort_values('Volatility (Std)', ascending=False)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**Most Volatile Teams** (highest std dev)")
-        top_volatile = volatility.head(10).copy()
-        top_volatile['Volatility (Std)'] = top_volatile['Volatility (Std)'].apply(lambda x: f"{x:.3f}")
-        top_volatile['Mean Rating'] = top_volatile['Mean Rating'].apply(lambda x: f"{x:.3f}")
-        top_volatile['Range'] = top_volatile['Range'].apply(lambda x: f"{x:.3f}")
-        st.dataframe(top_volatile[['Team', 'Volatility (Std)', 'Mean Rating', 'Range']], hide_index=True, use_container_width=True)
-
-    with col2:
-        st.markdown("**Most Stable Teams** (lowest std dev)")
-        bottom_volatile = volatility.tail(10).sort_values('Volatility (Std)').copy()
-        bottom_volatile['Volatility (Std)'] = bottom_volatile['Volatility (Std)'].apply(lambda x: f"{x:.3f}")
-        bottom_volatile['Mean Rating'] = bottom_volatile['Mean Rating'].apply(lambda x: f"{x:.3f}")
-        bottom_volatile['Range'] = bottom_volatile['Range'].apply(lambda x: f"{x:.3f}")
-        st.dataframe(bottom_volatile[['Team', 'Volatility (Std)', 'Mean Rating', 'Range']], hide_index=True, use_container_width=True)
-
-
-# =============================================================================
-# Page: ATS Momentum (Slope Analysis)
-# =============================================================================
-
-@timed
-def page_ats_momentum():
-    """Track team ATS rating momentum - which teams are trending up or down."""
-    st.title("📈 ATS Rating Momentum")
-    st.caption("Track which teams are trending up or down against the spread")
-
-    # Controls
-    col1, col2 = st.columns([1, 3])
-    with col1:
-        page_sport = st.selectbox("League", ["NBA", "NFL", "NCAAM"], key="momentum_sport")
-
-    # Use cached historical ratings and slopes
-    df = cached_historical_ratings(conn, page_sport)
-
-    if df.empty:
-        st.warning(f"No historical ratings found for {page_sport}")
-        return
-
-    # Get unique teams for the trajectory selector at bottom
-    teams = sorted(df['team'].unique())
-
-    # Use cached slopes computation (big win - was computing for all teams on every load)
-    results_df = cached_team_slopes(df, page_sport)
-
-    if results_df.empty:
-        st.warning("No data available to calculate momentum")
-        return
-
-    # Add direction indicators
-    def direction_indicator(slope):
-        if slope is None:
-            return '—'
-        if slope > 0.005:
-            return '↑↑'  # Strong rise
-        elif slope > 0.001:
-            return '↑'   # Rising
-        elif slope < -0.005:
-            return '↓↓'  # Strong fall
-        elif slope < -0.001:
-            return '↓'   # Falling
-        return '→'       # Flat
-
-    results_df['1W Dir'] = results_df['1W Slope'].apply(direction_indicator)
-    results_df['2W Dir'] = results_df['2W Slope'].apply(direction_indicator)
-    results_df['3W Dir'] = results_df['3W Slope'].apply(direction_indicator)
-
-    # Calculate Momentum Change (1W slope - 3W slope)
-    # Positive = accelerating (recent trend stronger), Negative = decelerating
-    def calc_momentum_change(row):
-        if pd.isna(row['1W Slope']) or pd.isna(row['3W Slope']):
-            return None
-        return row['1W Slope'] - row['3W Slope']
-
-    results_df['Momentum'] = results_df.apply(calc_momentum_change, axis=1)
-
-    def momentum_indicator(val):
-        if val is None:
-            return '—'
-        if val > 0.003:
-            return '🚀'  # Strong acceleration
-        elif val > 0.001:
-            return '⬆️'   # Accelerating
-        elif val < -0.003:
-            return '🔻'  # Strong deceleration
-        elif val < -0.001:
-            return '⬇️'   # Decelerating
-        return '➡️'       # Steady
-
-    results_df['Accel'] = results_df['Momentum'].apply(momentum_indicator)
-
-    st.markdown("---")
-
-    # Display controls
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        sort_by = st.selectbox("Sort by", ['ATS Rating', '1W Slope', '2W Slope', '3W Slope', 'Momentum', 'Rank'])
-    with col2:
-        ascending = st.checkbox("Ascending", value=False)
-
-    # Sort and display
-    sorted_df = results_df.sort_values(sort_by, ascending=ascending, na_position='last')
-
-    # Format for display
-    display_df = sorted_df[['Team', 'ATS Rating', 'Rank',
-                            '1W Slope', '1W Dir',
-                            '2W Slope', '2W Dir',
-                            '3W Slope', '3W Dir',
-                            'Momentum', 'Accel']].copy()
-
-    # Format numeric columns
-    display_df['ATS Rating'] = display_df['ATS Rating'].apply(lambda x: f"{x:.3f}" if pd.notna(x) else '—')
-    display_df['1W Slope'] = display_df['1W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-    display_df['2W Slope'] = display_df['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-    display_df['3W Slope'] = display_df['3W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-    display_df['Momentum'] = display_df['Momentum'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
-
-    st.markdown("---")
-
-    # Highlight sections
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("🔥 Hottest Teams (Rising Fast)")
-        hot = results_df.nlargest(5, '2W Slope')[['Team', 'ATS Rating', '2W Slope', '2W Dir']].copy()
-        hot['ATS Rating'] = hot['ATS Rating'].apply(lambda x: f"{x:.3f}")
-        hot['2W Slope'] = hot['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-        st.dataframe(hot, hide_index=True, use_container_width=True)
-
-    with col2:
-        st.subheader("❄️ Coldest Teams (Falling Fast)")
-        cold = results_df.nsmallest(5, '2W Slope')[['Team', 'ATS Rating', '2W Slope', '2W Dir']].copy()
-        cold['ATS Rating'] = cold['ATS Rating'].apply(lambda x: f"{x:.3f}")
-        cold['2W Slope'] = cold['2W Slope'].apply(lambda x: f"{x:+.4f}" if pd.notna(x) else '—')
-        st.dataframe(cold, hide_index=True, use_container_width=True)
-
-    st.markdown("---")
-
-    # Team trajectory mini-chart
-    st.subheader("Team Trajectory")
-    selected_team = st.selectbox("Select team to view trajectory", teams, key="momentum_team_select")
-    team_history = df[df['team'] == selected_team].sort_values('snapshot_date')
-
-    if not team_history.empty:
-        team_history['snapshot_date'] = pd.to_datetime(team_history['snapshot_date'])
-
-        fig = px.line(team_history, x='snapshot_date', y='ats_rating',
-                      title=f"{selected_team} ATS Rating Over Time")
-        fig.update_layout(
-            xaxis_title="Date",
-            yaxis_title="ATS Rating",
-            height=400
-        )
-        # Add tier reference lines
-        fig.add_hline(y=0.70, line_dash="dot", line_color="green", annotation_text="TOP (0.70)")
-        fig.add_hline(y=0.55, line_dash="dot", line_color="lightgreen", annotation_text="HIGH (0.55)")
-        fig.add_hline(y=0.45, line_dash="dot", line_color="gray", annotation_text="MID (0.45)")
-        fig.add_hline(y=0.30, line_dash="dot", line_color="orange", annotation_text="LOW (0.30)")
-
-        st.plotly_chart(fig, use_container_width=True)
-
-    # Legend
-    with st.expander("Understanding Slope & Momentum Values"):
-        st.markdown("""
-        **Slope** measures the daily rate of change in ATS rating over the specified window:
-
-        | Symbol | Meaning | Slope Value |
-        |--------|---------|-------------|
-        | ↑↑ | Strong Rise | > +0.005/day |
-        | ↑ | Rising | +0.001 to +0.005/day |
-        | → | Flat | -0.001 to +0.001/day |
-        | ↓ | Falling | -0.005 to -0.001/day |
-        | ↓↓ | Strong Fall | < -0.005/day |
-
-        ---
-
-        **Momentum** (1W Slope - 3W Slope) shows if the trend is accelerating or decelerating:
-
-        | Symbol | Meaning | Value |
-        |--------|---------|-------|
-        | 🚀 | Strong Acceleration | > +0.003 |
-        | ⬆️ | Accelerating | +0.001 to +0.003 |
-        | ➡️ | Steady | -0.001 to +0.001 |
-        | ⬇️ | Decelerating | -0.003 to -0.001 |
-        | 🔻 | Strong Deceleration | < -0.003 |
-
-        ---
-
-        **Strategy Implications**:
-        - **Rising + Accelerating** (↑ + 🚀): Strong buy signal - team improving and getting better faster
-        - **Rising + Decelerating** (↑ + 🔻): Trend may be peaking - watch for reversal
-        - **Falling + Accelerating** (↓ + 🚀): Potential bottom - decline slowing down
-        - **Falling + Decelerating** (↓ + 🔻): Avoid - team declining and getting worse faster
-        """)
-
-
-
-
-# =============================================================================
 # Page: Verification
 # =============================================================================
 
@@ -2163,56 +1864,116 @@ Example: If spread is -7 (home favored by 7):
 
 
 # =============================================================================
-# Page: Current ATS Streaks
+# Page: Current Streaks (ATS + Totals)
 # =============================================================================
 
 def page_current_streaks():
-    """Display current ATS streaks for all teams in the selected sport."""
-    st.title("🔥 Current ATS Streaks")
-    st.caption(f"Track which {selected_sport} teams are currently hot or cold against the spread")
+    """Display current streaks for all teams in the selected sport."""
+    st.title("🔥 Current Streaks")
+    st.caption(f"Track which {selected_sport} teams are currently hot or cold")
 
-    # Use cached streaks for fast loads
-    streaks = get_cached_streaks(conn, selected_sport)
-    if not streaks:
-        st.warning(f"No streak data available for {selected_sport}")
-        return
+    # Add tabs for ATS and Totals streaks
+    streak_tabs = st.tabs(["ATS Streaks", "Totals Streaks"])
 
-    # Get ratings as dict for lookup (also cached for fast loads)
-    rankings = {r.team: r for r in (get_cached_rankings(conn, selected_sport) or [])}
+    # =========================================================================
+    # ATS STREAKS TAB
+    # =========================================================================
+    with streak_tabs[0]:
+        st.subheader("🔥 Current ATS Streaks")
+        st.caption(f"Track which {selected_sport} teams are currently hot or cold against the spread")
 
-    # Build dataframe
-    rows = []
-    for team, info in streaks.items():
-        r = rankings.get(team)
-        rows.append({
-            'Team': team,
-            'Length': info['streak_length'],
-            'Streak': f"{info['streak_length']} {info['streak_type']}",
-            'Type': info['streak_type'],
-            'Win Rtg': round(r.win_rating, 3) if r else None,
-            'ATS Rtg': round(r.ats_rating, 3) if r else None,
-        })
-    df = pd.DataFrame(rows)
+        # Use cached streaks for fast loads
+        streaks = get_cached_streaks(conn, selected_sport)
+        if not streaks:
+            st.warning(f"No ATS streak data available for {selected_sport}")
+        else:
+            # Get ratings as dict for lookup (also cached for fast loads)
+            rankings = {r.team: r for r in (get_cached_rankings(conn, selected_sport) or [])}
 
-    sort_by = st.selectbox("Sort by", ["Length", "Team", "Win Rtg", "ATS Rtg"])
-    cols = ['Team', 'Length', 'Streak', 'Win Rtg', 'ATS Rtg']
+            # Build dataframe
+            rows = []
+            for team, info in streaks.items():
+                r = rankings.get(team)
+                rows.append({
+                    'Team': team,
+                    'Length': info['streak_length'],
+                    'Streak': f"{info['streak_length']} {info['streak_type']}",
+                    'Type': info['streak_type'],
+                    'Win Rtg': round(r.win_rating, 3) if r else None,
+                    'ATS Rtg': round(r.ats_rating, 3) if r else None,
+                })
+            df = pd.DataFrame(rows)
 
-    # Hot streaks
-    st.subheader("🔥 Hot Streaks (2+ ATS Wins)")
-    hot = df[(df['Type'] == 'WIN') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
-    if not hot.empty:
-        st.dataframe(hot[cols], use_container_width=True, hide_index=True)
+            sort_by = st.selectbox("Sort by", ["Length", "Team", "Win Rtg", "ATS Rtg"], key="ats_sort")
+            cols = ['Team', 'Length', 'Streak', 'Win Rtg', 'ATS Rtg']
 
-    # Cold streaks
-    st.subheader("❄️ Cold Streaks (2+ ATS Losses)")
-    cold = df[(df['Type'] == 'LOSS') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
-    if not cold.empty:
-        st.dataframe(cold[cols], use_container_width=True, hide_index=True)
+            # Hot streaks
+            st.subheader("🔥 Hot Streaks (2+ ATS Wins)")
+            hot = df[(df['Type'] == 'WIN') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+            if not hot.empty:
+                st.dataframe(hot[cols], use_container_width=True, hide_index=True)
+            else:
+                st.info("No teams currently on 2+ game ATS win streaks")
 
-    # All teams
-    st.subheader("📊 All Teams")
-    df_sorted = df.sort_values(sort_by, ascending=(sort_by == "Team"), na_position='last')
-    st.dataframe(df_sorted[cols], use_container_width=True, hide_index=True)
+            # Cold streaks
+            st.subheader("❄️ Cold Streaks (2+ ATS Losses)")
+            cold = df[(df['Type'] == 'LOSS') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+            if not cold.empty:
+                st.dataframe(cold[cols], use_container_width=True, hide_index=True)
+            else:
+                st.info("No teams currently on 2+ game ATS loss streaks")
+
+            # All teams
+            st.subheader("📊 All Teams")
+            df_sorted = df.sort_values(sort_by, ascending=(sort_by == "Team"), na_position='last')
+            st.dataframe(df_sorted[cols], use_container_width=True, hide_index=True)
+
+    # =========================================================================
+    # TOTALS STREAKS TAB
+    # =========================================================================
+    with streak_tabs[1]:
+        st.subheader("🎯 Current Totals Streaks")
+        st.caption(f"Track which {selected_sport} teams are currently running OVER or UNDER")
+
+        # Use cached O/U streaks for fast loads
+        ou_streaks = get_cached_ou_streaks(conn, selected_sport)
+        if not ou_streaks:
+            st.warning(f"No totals streak data available for {selected_sport}")
+        else:
+            # Build dataframe (no ratings - O/U doesn't have equivalent power rankings)
+            rows = []
+            for team, info in ou_streaks.items():
+                rows.append({
+                    'Team': team,
+                    'Length': info['streak_length'],
+                    'Streak': f"{info['streak_length']} {info['streak_type']}",
+                    'Type': info['streak_type'],
+                })
+            df = pd.DataFrame(rows)
+
+            sort_by = st.selectbox("Sort by", ["Length", "Team"], key="ou_sort")
+            cols = ['Team', 'Length', 'Streak']
+
+            # Hot streaks (OVER)
+            st.subheader("🔥 Hot Streaks (2+ OVERs)")
+            hot = df[(df['Type'] == 'OVER') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+            if not hot.empty:
+                st.dataframe(hot[cols], use_container_width=True, hide_index=True)
+            else:
+                st.info("No teams currently on 2+ game OVER streaks")
+
+            # Cold streaks (UNDER)
+            st.subheader("❄️ Cold Streaks (2+ UNDERs)")
+            cold = df[(df['Type'] == 'UNDER') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
+            if not cold.empty:
+                st.dataframe(cold[cols], use_container_width=True, hide_index=True)
+            else:
+                st.info("No teams currently on 2+ game UNDER streaks")
+
+            # All teams
+            st.subheader("📊 All Teams")
+            df_sorted = df.sort_values(sort_by, ascending=(sort_by == "Team"), na_position='last')
+            st.dataframe(df_sorted[cols], use_container_width=True, hide_index=True)
 
 
 # =============================================================================
@@ -2223,15 +1984,11 @@ if page == "🎲 Today's Picks":
     page_todays_picks()
 elif page == "🏆 Power Rankings":
     page_power_rankings()
-elif page == "📉 ATS Rating Trajectory":
-    page_ats_trajectory()
-elif page == "📈 ATS Momentum":
-    page_ats_momentum()
 elif page == "🔥 Current Streaks":
     page_current_streaks()
-elif page == "Macro Trends":
+elif page == "League-Wide Trends":
     page_macro_trends()
-elif page == "Micro (Team) Analysis":
+elif page == "Team Trends":
     page_micro_analysis()
 elif page == "Streak Analysis":
     page_streak_analysis()

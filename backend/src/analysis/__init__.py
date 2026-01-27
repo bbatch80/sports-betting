@@ -10,6 +10,10 @@ from .metrics import (
     ou_record,
     team_ou_cover_rate,
     team_ou_record,
+    # O/U streak analysis
+    ou_streak_continuation_analysis,
+    baseline_ou_coverage,
+    ou_streak_summary_all_lengths,
 )
 
 from .aggregations import (
@@ -46,4 +50,8 @@ __all__ = [
     'detect_ou_streak',
     'get_current_ou_streaks',
     'get_cached_ou_streaks',
+    # O/U streak analysis
+    'ou_streak_continuation_analysis',
+    'baseline_ou_coverage',
+    'ou_streak_summary_all_lengths',
 ]

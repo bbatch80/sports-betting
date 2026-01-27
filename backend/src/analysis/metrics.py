@@ -707,6 +707,276 @@ def get_streak_situations_detail(
 
 
 # =============================================================================
+# Over/Under (Totals) Streak Analysis
+# =============================================================================
+
+def ou_streak_continuation_analysis(
+    conn,
+    sport: str,
+    streak_length: int,
+    streak_type: str,
+    handicap_range: tuple = (0, 20),
+    direction: str = 'over',
+    _all_games_cache: dict = None
+) -> pd.DataFrame:
+    """
+    Analyze what happens to O/U results after OVER/UNDER streaks.
+
+    After X consecutive OVERs/UNDERs, what's the O/U cover rate at each handicap?
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        streak_length: Number of consecutive games (e.g., 3)
+        streak_type: 'OVER' or 'UNDER' - the streak to look for
+        handicap_range: Points added to total (0-20)
+        direction: 'over' or 'under' - which bet to analyze in the next game
+        _all_games_cache: Optional cache dict to reuse games data across calls
+
+    Returns:
+        DataFrame with: handicap, covers, total, cover_pct
+    """
+    from ..database import get_games
+
+    # Fetch all games for this sport ONCE
+    if _all_games_cache is not None and sport in _all_games_cache:
+        all_games = _all_games_cache[sport]
+    else:
+        all_games = get_games(conn, sport=sport)
+        if _all_games_cache is not None:
+            _all_games_cache[sport] = all_games
+
+    if len(all_games) == 0 or 'total_result' not in all_games.columns:
+        return pd.DataFrame()
+
+    # Filter games with totals data
+    all_games = all_games[all_games['total_result'].notna()]
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+
+    # Collect all "next game" total results after the specified streak
+    next_game_total_results = []
+
+    for team in teams:
+        # Filter games for this team in memory
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < streak_length + 1:
+            continue
+
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+
+        # Calculate O/U result for each game to identify streaks
+        game_data = []
+        for _, row in team_games.iterrows():
+            total_result = row['total_result']
+            # Skip pushes
+            if total_result == 0:
+                is_over = None
+            else:
+                is_over = total_result > 0
+            game_data.append({
+                'total_result': total_result,
+                'is_over': is_over
+            })
+
+        # Find situations matching the streak criteria
+        target_is_over = (streak_type == 'OVER')
+
+        for i in range(streak_length, len(game_data)):
+            # Skip if this game was a push
+            if game_data[i]['is_over'] is None:
+                continue
+
+            # Check if there's a streak of exactly streak_length ending at i-1
+            streak_len = 0
+            for j in range(i-1, -1, -1):
+                if game_data[j]['is_over'] is None:
+                    # Push breaks the streak
+                    break
+                if game_data[j]['is_over'] == target_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_len >= streak_length:
+                # Record the next game's total result for handicap analysis
+                next_game_total_results.append({
+                    'total_result': game_data[i]['total_result']
+                })
+
+    if not next_game_total_results:
+        return pd.DataFrame()
+
+    # Now calculate cover rate at each handicap level
+    results = []
+    for handicap in range(handicap_range[0], handicap_range[1] + 1):
+        covers = 0
+        for ng in next_game_total_results:
+            if direction == 'over':
+                # OVER covers when total_result + handicap > 0
+                covered = (ng['total_result'] + handicap) > 0
+            else:  # under
+                # UNDER covers when total_result - handicap < 0
+                covered = (ng['total_result'] - handicap) < 0
+            if covered:
+                covers += 1
+
+        total = len(next_game_total_results)
+        results.append({
+            'handicap': handicap,
+            'covers': covers,
+            'total': total,
+            'cover_pct': covers / total if total > 0 else 0
+        })
+
+    return pd.DataFrame(results)
+
+
+def baseline_ou_coverage(
+    conn,
+    sport: str,
+    handicap_range: tuple = (0, 20),
+    direction: str = 'over'
+) -> pd.DataFrame:
+    """
+    Calculate league-wide baseline O/U cover rate at each handicap.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        handicap_range: (min, max) handicap to analyze
+        direction: 'over' or 'under' - which bet to calculate baseline for
+
+    Returns:
+        DataFrame with: handicap, baseline_cover_pct
+    """
+    from ..database import get_games
+
+    games = get_games(conn, sport=sport)
+    if len(games) == 0 or 'total_result' not in games.columns:
+        return pd.DataFrame()
+
+    # Filter games with totals data
+    games = games[games['total_result'].notna()]
+    if len(games) == 0:
+        return pd.DataFrame()
+
+    results = []
+    for handicap in range(handicap_range[0], handicap_range[1] + 1):
+        if direction == 'over':
+            # OVER covers when total_result + handicap > 0
+            covers = ((games['total_result'] + handicap) > 0).sum()
+        else:  # under
+            # UNDER covers when total_result - handicap < 0
+            covers = ((games['total_result'] - handicap) < 0).sum()
+
+        total = len(games)
+        results.append({
+            'handicap': handicap,
+            'baseline_covers': int(covers),
+            'baseline_total': total,
+            'baseline_cover_pct': covers / total if total > 0 else 0
+        })
+
+    return pd.DataFrame(results)
+
+
+def ou_streak_summary_all_lengths(
+    conn,
+    sport: str,
+    streak_range: tuple = (2, 10)
+) -> pd.DataFrame:
+    """
+    Get summary of O/U streak occurrences across all lengths.
+
+    Returns count of situations for each streak length/type combination.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        streak_range: (min, max) streak lengths to count
+
+    Returns:
+        DataFrame with: streak_length, streak_type, situations
+    """
+    from ..database import get_games
+
+    # Fetch all games for this sport ONCE
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0 or 'total_result' not in all_games.columns:
+        return pd.DataFrame()
+
+    # Filter games with totals data
+    all_games = all_games[all_games['total_result'].notna()]
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Get unique teams from the data
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    counts = {}
+
+    for team in teams:
+        # Filter games for this team in memory
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < 3:
+            continue
+
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+
+        # Calculate O/U result for each game
+        ou_results = []
+        for _, row in team_games.iterrows():
+            total_result = row['total_result']
+            # Skip pushes
+            if total_result == 0:
+                ou_results.append(None)
+            else:
+                ou_results.append(total_result > 0)  # True = OVER, False = UNDER
+
+        # Count streaks
+        for i in range(2, len(ou_results)):
+            if ou_results[i] is None:
+                continue
+
+            streak_len = 0
+            streak_is_over = None
+
+            for j in range(i-1, -1, -1):
+                if ou_results[j] is None:
+                    break
+                if streak_is_over is None:
+                    streak_is_over = ou_results[j]
+                    streak_len = 1
+                elif ou_results[j] == streak_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_range[0] <= streak_len <= streak_range[1]:
+                key = (streak_len, 'OVER' if streak_is_over else 'UNDER')
+                counts[key] = counts.get(key, 0) + 1
+
+    results = []
+    for (length, stype), count in sorted(counts.items()):
+        results.append({
+            'streak_length': length,
+            'streak_type': stype,
+            'situations': count
+        })
+
+    return pd.DataFrame(results)
+
+
+# =============================================================================
 # CLI for testing
 # =============================================================================
 
