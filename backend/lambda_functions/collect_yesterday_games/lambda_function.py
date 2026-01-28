@@ -88,12 +88,13 @@ def make_api_request(endpoint: str, params: Dict[str, Any], api_key: str) -> Any
 
 
 def get_closing_odds(api_key: str, sport_key: str, event_id: str,
-                     home_team: str, commence_time: str) -> tuple:
+                     home_team: str, away_team: str, commence_time: str) -> tuple:
     """
-    Get closing spread and total from DraftKings via historical odds endpoint.
+    Get closing spread, total, and team totals from DraftKings via historical odds endpoint.
 
     Returns:
-        tuple: (closing_spread, closing_total) - either can be None
+        tuple: (closing_spread, closing_total, home_team_total, away_team_total)
+               Any value can be None if not available
     """
     api_sport_key = SPORT_API_KEYS[sport_key]
 
@@ -109,7 +110,7 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
             endpoint=f"historical/sports/{api_sport_key}/events/{event_id}/odds",
             params={
                 'date': snapshot_date,
-                'markets': 'spreads,totals',  # Request both markets
+                'markets': 'spreads,totals,team_totals',  # Include team_totals
                 'regions': ','.join(DEFAULT_REGIONS),
                 'oddsFormat': 'american',
                 'dateFormat': 'iso'
@@ -118,11 +119,13 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
         )
 
         if not historical_odds or not historical_odds.get('data'):
-            return None, None
+            return None, None, None, None
 
         bookmakers = historical_odds['data'].get('bookmakers', [])
         closing_spread = None
         closing_total = None
+        home_team_total = None
+        away_team_total = None
 
         # Find DraftKings odds
         for bookmaker in bookmakers:
@@ -147,12 +150,34 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
                             if outcome.get('point') is not None:
                                 closing_total = outcome.get('point')
                                 break
+
+                    # Extract team totals (individual team O/U lines)
+                    elif market.get('key') == 'team_totals':
+                        outcomes = market.get('outcomes', [])
+                        for outcome in outcomes:
+                            team_desc = outcome.get('description', '')
+                            bet_type = outcome.get('name', '')
+                            point = outcome.get('point')
+
+                            # Only process 'Over' to get the line (Under has same point)
+                            if bet_type.lower() != 'over' or point is None:
+                                continue
+
+                            # Match team by description field
+                            team_lower = team_desc.lower()
+                            if (home_team.lower() in team_lower or
+                                team_lower in home_team.lower()):
+                                home_team_total = point
+                            elif (away_team.lower() in team_lower or
+                                  team_lower in away_team.lower()):
+                                away_team_total = point
+
                 break  # Found DraftKings, stop looking
 
-        return closing_spread, closing_total
+        return closing_spread, closing_total, home_team_total, away_team_total
     except Exception as e:
         logger.warning(f"Error getting odds for {event_id}: {e}")
-        return None, None
+        return None, None, None, None
 
 
 def extract_scores(game_data: Dict[str, Any], home_team: str, away_team: str) -> tuple:
@@ -192,9 +217,11 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
 
     upsert_sql = text("""
         INSERT INTO games (sport, game_date, home_team, away_team, closing_spread, closing_total,
-                           home_score, away_score, spread_result, total_result)
+                           home_score, away_score, spread_result, total_result,
+                           home_team_total, away_team_total, home_team_total_result, away_team_total_result)
         VALUES (:sport, :game_date, :home_team, :away_team, :closing_spread, :closing_total,
-                :home_score, :away_score, :spread_result, :total_result)
+                :home_score, :away_score, :spread_result, :total_result,
+                :home_team_total, :away_team_total, :home_team_total_result, :away_team_total_result)
         ON CONFLICT (sport, game_date, home_team, away_team)
         DO UPDATE SET
             closing_spread = COALESCE(EXCLUDED.closing_spread, games.closing_spread),
@@ -202,7 +229,11 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
             home_score = COALESCE(EXCLUDED.home_score, games.home_score),
             away_score = COALESCE(EXCLUDED.away_score, games.away_score),
             spread_result = COALESCE(EXCLUDED.spread_result, games.spread_result),
-            total_result = COALESCE(EXCLUDED.total_result, games.total_result)
+            total_result = COALESCE(EXCLUDED.total_result, games.total_result),
+            home_team_total = COALESCE(EXCLUDED.home_team_total, games.home_team_total),
+            away_team_total = COALESCE(EXCLUDED.away_team_total, games.away_team_total),
+            home_team_total_result = COALESCE(EXCLUDED.home_team_total_result, games.home_team_total_result),
+            away_team_total_result = COALESCE(EXCLUDED.away_team_total_result, games.away_team_total_result)
     """)
 
     try:
@@ -262,6 +293,7 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
     games_data = []
     spreads_found = 0
     totals_found = 0
+    team_totals_found = 0
 
     for game in games_to_process:
         event_id = game.get('id')
@@ -272,12 +304,16 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
         # Extract scores
         home_score, away_score = extract_scores(game, home_team, away_team)
 
-        # Get closing spread and total (single API call for both)
-        closing_spread, closing_total = get_closing_odds(api_key, sport_key, event_id, home_team, commence_time)
+        # Get closing spread, total, and team totals (single API call)
+        closing_spread, closing_total, home_team_total, away_team_total = get_closing_odds(
+            api_key, sport_key, event_id, home_team, away_team, commence_time
+        )
         if closing_spread is not None:
             spreads_found += 1
         if closing_total is not None:
             totals_found += 1
+        if home_team_total is not None or away_team_total is not None:
+            team_totals_found += 1
 
         # Calculate spread result
         spread_result = None
@@ -288,6 +324,14 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
         total_result = None
         if home_score is not None and away_score is not None and closing_total is not None:
             total_result = (home_score + away_score) - closing_total
+
+        # Calculate team total results (positive = OVER, negative = UNDER)
+        home_team_total_result = None
+        away_team_total_result = None
+        if home_score is not None and home_team_total is not None:
+            home_team_total_result = home_score - home_team_total
+        if away_score is not None and away_team_total is not None:
+            away_team_total_result = away_score - away_team_total
 
         # Parse game date
         try:
@@ -306,10 +350,16 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
             'home_score': home_score,
             'away_score': away_score,
             'spread_result': spread_result,
-            'total_result': total_result
+            'total_result': total_result,
+            'home_team_total': home_team_total,
+            'away_team_total': away_team_total,
+            'home_team_total_result': home_team_total_result,
+            'away_team_total_result': away_team_total_result
         })
 
-    logger.info(f"Got spreads for {spreads_found}/{len(games_to_process)} games, totals for {totals_found}/{len(games_to_process)} games")
+    logger.info(f"Got spreads for {spreads_found}/{len(games_to_process)} games, "
+                f"totals for {totals_found}/{len(games_to_process)}, "
+                f"team totals for {team_totals_found}/{len(games_to_process)}")
 
     # Write to database
     db_rows = write_games_to_database(games_data, sport_key)
@@ -319,6 +369,7 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
         'new_games': len(games_data),
         'spreads_found': spreads_found,
         'totals_found': totals_found,
+        'team_totals_found': team_totals_found,
         'db_rows': db_rows
     }
 

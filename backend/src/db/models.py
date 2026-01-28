@@ -61,6 +61,14 @@ games = Table(
     Column("total_result", Float),   # (home_score + away_score) - closing_total
                                      # Positive = OVER, Negative = UNDER
 
+    # Team Totals - Individual team O/U lines (e.g., "Lakers O/U 115.5")
+    Column("home_team_total", Float),        # O/U line for home team
+    Column("away_team_total", Float),        # O/U line for away team
+    Column("home_team_total_result", Float), # home_score - home_team_total
+                                             # Positive = OVER, Negative = UNDER
+    Column("away_team_total_result", Float), # away_score - away_team_total
+                                             # Positive = OVER, Negative = UNDER
+
     # Ensure no duplicate games
     UniqueConstraint(
         "sport", "game_date", "home_team", "away_team",
