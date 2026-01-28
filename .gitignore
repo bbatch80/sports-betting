@@ -31,8 +31,9 @@ wheels/
 .env
 .env.local
 
-# Notebooks with database credentials
-backend/notebooks/*_totals_analysis.ipynb
+# Jupyter notebooks (keep locally, don't track)
+*.ipynb
+.ipynb_checkpoints/
 
 # Local automation configs (may contain API keys)
 backend/automation/*.plist
