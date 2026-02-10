@@ -144,31 +144,22 @@ def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
                             fallback_total_source = bookmaker_name
                         break
 
-            # Extract team totals (individual team O/U lines)
+            # Extract team totals — match by exact description against API names
             elif market.get('key') == 'team_totals':
                 for outcome in market.get('outcomes', []):
-                    team_desc = outcome.get('description', '')
-                    bet_type = outcome.get('name', '')
-                    point = outcome.get('point')
-
-                    # Only process 'Over' to get the line (Under has same point)
-                    if bet_type.lower() != 'over' or point is None:
+                    if outcome.get('name', '').lower() != 'over' or outcome.get('point') is None:
                         continue
-
-                    # Match team by description field
-                    team_lower = team_desc.lower()
-                    if (home_team.lower() in team_lower or
-                            team_lower in home_team.lower()):
+                    desc = outcome.get('description', '')
+                    if desc == home_team:
                         if is_dk:
-                            result['home_team_total'] = point
+                            result['home_team_total'] = outcome['point']
                         elif fallback_home_tt is None:
-                            fallback_home_tt = point
-                    elif (away_team.lower() in team_lower or
-                          team_lower in away_team.lower()):
+                            fallback_home_tt = outcome['point']
+                    elif desc == away_team:
                         if is_dk:
-                            result['away_team_total'] = point
+                            result['away_team_total'] = outcome['point']
                         elif fallback_away_tt is None:
-                            fallback_away_tt = point
+                            fallback_away_tt = outcome['point']
 
     # Use fallback values if DraftKings not found
     if result['spread'] is None and fallback_spread is not None:

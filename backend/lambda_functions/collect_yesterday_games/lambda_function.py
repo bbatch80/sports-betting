@@ -121,6 +121,12 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
         if not historical_odds or not historical_odds.get('data'):
             return None, None, None, None
 
+        # Use the API response's own team names for matching within outcomes.
+        # This avoids mismatches between our DB names (from scores endpoint)
+        # and the names used in odds outcomes (e.g., "BYU Cougars" vs "Brigham Young Cougars").
+        api_home = historical_odds['data'].get('home_team', '')
+        api_away = historical_odds['data'].get('away_team', '')
+
         bookmakers = historical_odds['data'].get('bookmakers', [])
         closing_spread = None
         closing_total = None
@@ -131,17 +137,13 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
         for bookmaker in bookmakers:
             if 'draftkings' in bookmaker.get('key', '').lower():
                 for market in bookmaker.get('markets', []):
-                    # Extract spread
+                    # Extract spread — match home team to get home spread
                     if market.get('key') == 'spreads' and closing_spread is None:
                         outcomes = market.get('outcomes', [])
                         for outcome in outcomes:
-                            outcome_name = outcome.get('name', '')
-                            if home_team.lower() in outcome_name.lower() or outcome_name.lower() in home_team.lower():
+                            if outcome.get('name', '') == api_home:
                                 closing_spread = outcome.get('point')
                                 break
-                        # Fallback to first outcome
-                        if closing_spread is None and outcomes:
-                            closing_spread = outcomes[0].get('point')
 
                     # Extract total (Over/Under have same point value)
                     elif market.get('key') == 'totals' and closing_total is None:
@@ -151,26 +153,17 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
                                 closing_total = outcome.get('point')
                                 break
 
-                    # Extract team totals (individual team O/U lines)
+                    # Extract team totals — match by description against API names
                     elif market.get('key') == 'team_totals':
                         outcomes = market.get('outcomes', [])
                         for outcome in outcomes:
-                            team_desc = outcome.get('description', '')
-                            bet_type = outcome.get('name', '')
-                            point = outcome.get('point')
-
-                            # Only process 'Over' to get the line (Under has same point)
-                            if bet_type.lower() != 'over' or point is None:
+                            if outcome.get('name', '').lower() != 'over' or outcome.get('point') is None:
                                 continue
-
-                            # Match team by description field
-                            team_lower = team_desc.lower()
-                            if (home_team.lower() in team_lower or
-                                team_lower in home_team.lower()):
-                                home_team_total = point
-                            elif (away_team.lower() in team_lower or
-                                  team_lower in away_team.lower()):
-                                away_team_total = point
+                            desc = outcome.get('description', '')
+                            if desc == api_home:
+                                home_team_total = outcome['point']
+                            elif desc == api_away:
+                                away_team_total = outcome['point']
 
                 break  # Found DraftKings, stop looking
 
