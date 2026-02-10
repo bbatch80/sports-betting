@@ -155,6 +155,17 @@ todays_games = Table(
     Column("total", Float),           # Over/under line
     Column("total_source", String(50)),  # Bookmaker name
 
+    # Opening team totals (captured at 6:30 AM by collect_todays_games Lambda)
+    Column("home_team_total", Float),  # O/U line for home team
+    Column("away_team_total", Float),  # O/U line for away team
+
+    # Closing lines (captured 30 min before game by n8n workflow)
+    Column("closing_spread", Float),       # Closing spread
+    Column("closing_total", Float),        # Closing game total
+    Column("closing_home_tt", Float),      # Closing home team total
+    Column("closing_away_tt", Float),      # Closing away team total
+    Column("closing_captured_at", DateTime),  # When closing lines were captured
+
     # Timestamps
     Column("created_at", DateTime),
     Column("updated_at", DateTime),

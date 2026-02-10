@@ -87,19 +87,22 @@ def make_api_request(endpoint: str, params: Dict[str, Any], api_key: str) -> Any
 
 def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract current spread and total from game data (DraftKings preferred).
+    Extract current spread, total, and team totals from game data (DraftKings preferred).
 
     Returns:
-        dict with keys: spread, spread_source, total, total_source
+        dict with keys: spread, spread_source, total, total_source, home_team_total, away_team_total
     """
     home_team = game.get('home_team', '')
+    away_team = game.get('away_team', '')
     bookmakers = game.get('bookmakers', [])
 
     result = {
         'spread': None,
         'spread_source': None,
         'total': None,
-        'total_source': None
+        'total_source': None,
+        'home_team_total': None,
+        'away_team_total': None
     }
 
     # Track fallback values for non-DraftKings bookmakers
@@ -107,6 +110,8 @@ def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
     fallback_spread_source = None
     fallback_total = None
     fallback_total_source = None
+    fallback_home_tt = None
+    fallback_away_tt = None
 
     for bookmaker in bookmakers:
         is_dk = 'draftkings' in bookmaker.get('key', '').lower()
@@ -139,6 +144,32 @@ def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
                             fallback_total_source = bookmaker_name
                         break
 
+            # Extract team totals (individual team O/U lines)
+            elif market.get('key') == 'team_totals':
+                for outcome in market.get('outcomes', []):
+                    team_desc = outcome.get('description', '')
+                    bet_type = outcome.get('name', '')
+                    point = outcome.get('point')
+
+                    # Only process 'Over' to get the line (Under has same point)
+                    if bet_type.lower() != 'over' or point is None:
+                        continue
+
+                    # Match team by description field
+                    team_lower = team_desc.lower()
+                    if (home_team.lower() in team_lower or
+                            team_lower in home_team.lower()):
+                        if is_dk:
+                            result['home_team_total'] = point
+                        elif fallback_home_tt is None:
+                            fallback_home_tt = point
+                    elif (away_team.lower() in team_lower or
+                          team_lower in away_team.lower()):
+                        if is_dk:
+                            result['away_team_total'] = point
+                        elif fallback_away_tt is None:
+                            fallback_away_tt = point
+
     # Use fallback values if DraftKings not found
     if result['spread'] is None and fallback_spread is not None:
         result['spread'] = fallback_spread
@@ -146,6 +177,10 @@ def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
     if result['total'] is None and fallback_total is not None:
         result['total'] = fallback_total
         result['total_source'] = fallback_total_source
+    if result['home_team_total'] is None and fallback_home_tt is not None:
+        result['home_team_total'] = fallback_home_tt
+    if result['away_team_total'] is None and fallback_away_tt is not None:
+        result['away_team_total'] = fallback_away_tt
 
     return result
 
@@ -162,15 +197,21 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
 
     upsert_sql = text("""
         INSERT INTO todays_games (sport, game_date, commence_time, home_team, away_team,
-                                  spread, spread_source, total, total_source, created_at, updated_at)
+                                  spread, spread_source, total, total_source,
+                                  home_team_total, away_team_total,
+                                  created_at, updated_at)
         VALUES (:sport, :game_date, :commence_time, :home_team, :away_team,
-                :spread, :spread_source, :total, :total_source, :created_at, :updated_at)
+                :spread, :spread_source, :total, :total_source,
+                :home_team_total, :away_team_total,
+                :created_at, :updated_at)
         ON CONFLICT (sport, game_date, home_team, away_team)
         DO UPDATE SET
             spread = EXCLUDED.spread,
             spread_source = EXCLUDED.spread_source,
             total = EXCLUDED.total,
             total_source = EXCLUDED.total_source,
+            home_team_total = EXCLUDED.home_team_total,
+            away_team_total = EXCLUDED.away_team_total,
             commence_time = EXCLUDED.commence_time,
             updated_at = EXCLUDED.updated_at
     """)
@@ -224,7 +265,7 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
         endpoint=f"sports/{api_sport_key}/odds",
         params={
             'regions': ','.join(DEFAULT_REGIONS),
-            'markets': 'spreads,totals',  # Request both markets
+            'markets': 'spreads,totals,team_totals',  # Request spreads, totals, and team totals
             'oddsFormat': 'american',
             'dateFormat': 'iso'
         },
@@ -259,6 +300,8 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
                     'spread_source': odds['spread_source'],
                     'total': odds['total'],
                     'total_source': odds['total_source'],
+                    'home_team_total': odds['home_team_total'],
+                    'away_team_total': odds['away_team_total'],
                     'created_at': now,
                     'updated_at': now
                 })
