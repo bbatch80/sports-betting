@@ -253,6 +253,44 @@ Index("idx_current_streaks_sport", current_streaks.c.sport)
 
 
 # =============================================================================
+# Current O/U Streaks Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+current_ou_streaks = Table(
+    "current_ou_streaks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("sport", String(50), nullable=False),
+    Column("team", String(100), nullable=False),
+    Column("streak_length", Integer),
+    Column("streak_type", String(10)),  # 'OVER' or 'UNDER'
+    Column("computed_at", DateTime),
+    UniqueConstraint("sport", "team", name="uq_current_ou_streak"),
+)
+
+Index("idx_current_ou_streaks_sport", current_ou_streaks.c.sport)
+
+
+# =============================================================================
+# Current TT Streaks Table (pre-computed daily for fast dashboard loads)
+# =============================================================================
+
+current_tt_streaks = Table(
+    "current_tt_streaks",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("sport", String(50), nullable=False),
+    Column("team", String(100), nullable=False),
+    Column("streak_length", Integer),
+    Column("streak_type", String(10)),  # 'OVER' or 'UNDER'
+    Column("computed_at", DateTime),
+    UniqueConstraint("sport", "team", name="uq_current_tt_streak"),
+)
+
+Index("idx_current_tt_streaks_sport", current_tt_streaks.c.sport)
+
+
+# =============================================================================
 # Detected Patterns Table (pre-computed daily for fast dashboard loads)
 # =============================================================================
 
@@ -264,8 +302,9 @@ detected_patterns = Table(
 
     # Pattern identification
     Column("sport", String(50), nullable=False),
+    Column("market_type", String(10), server_default="ats"),  # 'ats', 'ou', 'tt'
     Column("pattern_type", String(20), nullable=False),  # 'streak_fade' or 'streak_ride'
-    Column("streak_type", String(10), nullable=False),   # 'WIN' or 'LOSS'
+    Column("streak_type", String(10), nullable=False),   # 'WIN'/'LOSS' (ATS) or 'OVER'/'UNDER' (O/U, TT)
     Column("streak_length", Integer, nullable=False),
     Column("handicap", Integer, nullable=False),
 
@@ -279,9 +318,9 @@ detected_patterns = Table(
     # Timestamp
     Column("computed_at", DateTime),
 
-    # Ensure one pattern per combination
+    # Ensure one pattern per combination (includes market_type)
     UniqueConstraint(
-        "sport", "pattern_type", "streak_type", "streak_length", "handicap",
+        "sport", "market_type", "pattern_type", "streak_type", "streak_length", "handicap",
         name="uq_detected_pattern"
     ),
 )
@@ -311,17 +350,35 @@ todays_recommendations = Table(
     Column("spread", Float),
     Column("spread_source", String(100)),
 
+    # Totals info
+    Column("total", Float),
+    Column("total_source", String(100)),
+    Column("home_team_total", Float),
+    Column("away_team_total", Float),
+
     # Team tiers and ratings
     Column("home_tier", String(20)),
     Column("away_tier", String(20)),
     Column("home_ats_rating", Float),
     Column("away_ats_rating", Float),
 
-    # Streak info
+    # ATS Streak info
     Column("home_streak_length", Integer),
     Column("home_streak_type", String(10)),
     Column("away_streak_length", Integer),
     Column("away_streak_type", String(10)),
+
+    # O/U Streak info
+    Column("home_ou_streak_length", Integer),
+    Column("home_ou_streak_type", String(10)),
+    Column("away_ou_streak_length", Integer),
+    Column("away_ou_streak_type", String(10)),
+
+    # TT Streak info
+    Column("home_tt_streak_length", Integer),
+    Column("home_tt_streak_type", String(10)),
+    Column("away_tt_streak_length", Integer),
+    Column("away_tt_streak_type", String(10)),
 
     # Recommendations stored as JSON
     Column("recommendations_json", String(4000)),  # JSON array of BetRecommendation objects

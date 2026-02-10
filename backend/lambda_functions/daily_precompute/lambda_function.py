@@ -85,7 +85,9 @@ def get_games_for_sport(engine, sport: str) -> List[Dict[str, Any]]:
     """Fetch all games for a sport from the database."""
     query = text("""
         SELECT game_date, home_team, away_team, home_score, away_score,
-               closing_spread, spread_result
+               closing_spread, spread_result,
+               total_result, home_team_total, away_team_total,
+               home_team_total_result, away_team_total_result, closing_total
         FROM games
         WHERE sport = :sport
         ORDER BY game_date
@@ -283,6 +285,147 @@ def compute_current_streak(games: List[Dict], team: str) -> Tuple[int, str]:
             break
 
     return (streak_length, streak_type or 'WIN')
+
+
+def compute_current_ou_streak(games: List[Dict], team: str) -> Tuple[int, str]:
+    """Compute current O/U streak for a team (game total over/under)."""
+    team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
+
+    if not team_games:
+        return (0, 'OVER')
+
+    from datetime import datetime as dt
+    def get_date(g):
+        d = g['game_date']
+        if isinstance(d, str):
+            return dt.strptime(d, '%Y-%m-%d').date()
+        return d
+
+    team_games.sort(key=get_date, reverse=True)
+
+    streak_length = 0
+    streak_type = None
+
+    for game in team_games:
+        total_result = game.get('total_result')
+
+        if total_result is None or total_result == 0:
+            continue
+
+        is_over = total_result > 0
+
+        if streak_type is None:
+            streak_type = 'OVER' if is_over else 'UNDER'
+            streak_length = 1
+        elif (streak_type == 'OVER') == is_over:
+            streak_length += 1
+        else:
+            break
+
+    return (streak_length, streak_type or 'OVER')
+
+
+def compute_current_tt_streak(games: List[Dict], team: str) -> Tuple[int, str]:
+    """Compute current team total O/U streak for a team."""
+    team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
+
+    if not team_games:
+        return (0, 'OVER')
+
+    from datetime import datetime as dt
+    def get_date(g):
+        d = g['game_date']
+        if isinstance(d, str):
+            return dt.strptime(d, '%Y-%m-%d').date()
+        return d
+
+    team_games.sort(key=get_date, reverse=True)
+
+    streak_length = 0
+    streak_type = None
+
+    for game in team_games:
+        is_home = game['home_team'] == team
+        margin = game.get('home_team_total_result') if is_home else game.get('away_team_total_result')
+
+        if margin is None or margin == 0:
+            continue
+
+        is_over = margin > 0
+
+        if streak_type is None:
+            streak_type = 'OVER' if is_over else 'UNDER'
+            streak_length = 1
+        elif (streak_type == 'OVER') == is_over:
+            streak_length += 1
+        else:
+            break
+
+    return (streak_length, streak_type or 'OVER')
+
+
+def write_current_ou_streaks(engine, sport: str, streaks_data: Dict[str, Tuple[int, str]], computed_at: datetime) -> int:
+    """Write current O/U streaks to database."""
+    if not streaks_data:
+        return 0
+
+    upsert_sql = text("""
+        INSERT INTO current_ou_streaks
+        (sport, team, streak_length, streak_type, computed_at)
+        VALUES (:sport, :team, :streak_length, :streak_type, :computed_at)
+        ON CONFLICT (sport, team)
+        DO UPDATE SET
+            streak_length = EXCLUDED.streak_length,
+            streak_type = EXCLUDED.streak_type,
+            computed_at = EXCLUDED.computed_at
+    """)
+
+    rows = []
+    for team, (length, stype) in streaks_data.items():
+        rows.append({
+            'sport': sport,
+            'team': team,
+            'streak_length': length,
+            'streak_type': stype,
+            'computed_at': computed_at,
+        })
+
+    with engine.begin() as conn:
+        conn.execute(upsert_sql, rows)
+
+    return len(rows)
+
+
+def write_current_tt_streaks(engine, sport: str, streaks_data: Dict[str, Tuple[int, str]], computed_at: datetime) -> int:
+    """Write current TT streaks to database."""
+    if not streaks_data:
+        return 0
+
+    upsert_sql = text("""
+        INSERT INTO current_tt_streaks
+        (sport, team, streak_length, streak_type, computed_at)
+        VALUES (:sport, :team, :streak_length, :streak_type, :computed_at)
+        ON CONFLICT (sport, team)
+        DO UPDATE SET
+            streak_length = EXCLUDED.streak_length,
+            streak_type = EXCLUDED.streak_type,
+            computed_at = EXCLUDED.computed_at
+    """)
+
+    rows = []
+    for team, (length, stype) in streaks_data.items():
+        rows.append({
+            'sport': sport,
+            'team': team,
+            'streak_length': length,
+            'streak_type': stype,
+            'computed_at': computed_at,
+        })
+
+    with engine.begin() as conn:
+        conn.execute(upsert_sql, rows)
+
+    return len(rows)
 
 
 def write_current_rankings(engine, sport: str, rankings_data: List[Dict], computed_at: datetime) -> int:
@@ -506,22 +649,308 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
     return patterns
 
 
+def compute_ou_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 20)) -> Dict[int, float]:
+    """Compute baseline O/U OVER cover rates at each handicap level."""
+    baseline = {}
+
+    # Filter games with total_result
+    valid_games = [g for g in games if g.get('total_result') is not None]
+    if not valid_games:
+        return baseline
+
+    for handicap in range(handicap_range[0], handicap_range[1] + 1):
+        covers = 0
+        total = len(valid_games)
+
+        for g in valid_games:
+            # OVER covers when total_result + handicap > 0
+            if (g['total_result'] + handicap) > 0:
+                covers += 1
+
+        baseline[handicap] = covers / total if total > 0 else 0.5
+
+    return baseline
+
+
+def compute_ou_streak_continuation(
+    games: List[Dict],
+    teams: Set[str],
+    streak_length: int,
+    streak_type: str,
+    handicap_range: Tuple[int, int] = (0, 20)
+) -> Dict[int, Tuple[int, int]]:
+    """
+    Compute OVER cover counts at each handicap for games following an O/U streak.
+
+    Returns: {handicap: (covers, total)}
+    """
+    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+
+    target_is_over = (streak_type == 'OVER')
+
+    for team in teams:
+        team_games = [g for g in games
+                      if (g['home_team'] == team or g['away_team'] == team)
+                      and g.get('total_result') is not None]
+        if len(team_games) < streak_length + 1:
+            continue
+
+        from datetime import datetime as dt
+        def get_date(g):
+            d = g['game_date']
+            if isinstance(d, str):
+                return dt.strptime(d, '%Y-%m-%d').date()
+            return d
+
+        team_games.sort(key=get_date)
+
+        # Build game data
+        game_data = []
+        for g in team_games:
+            total_result = g['total_result']
+            if total_result == 0:
+                game_data.append({'total_result': total_result, 'is_over': None})
+            else:
+                game_data.append({'total_result': total_result, 'is_over': total_result > 0})
+
+        for i in range(streak_length, len(game_data)):
+            if game_data[i]['is_over'] is None:
+                continue
+
+            streak_len = 0
+            for j in range(i - 1, -1, -1):
+                if game_data[j]['is_over'] is None:
+                    break
+                if game_data[j]['is_over'] == target_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_len >= streak_length:
+                total_result = game_data[i]['total_result']
+                for handicap in range(handicap_range[0], handicap_range[1] + 1):
+                    covered = (total_result + handicap) > 0  # OVER at this handicap
+                    results[handicap][1] += 1
+                    if covered:
+                        results[handicap][0] += 1
+
+    return {h: tuple(v) for h, v in results.items()}
+
+
+def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
+    """Detect all significant O/U streak patterns for a sport."""
+    cfg = PATTERN_CONFIG
+    ou_handicap_range = (0, 20)
+    patterns = []
+
+    teams = set()
+    for g in games:
+        teams.add(g['home_team'])
+        teams.add(g['away_team'])
+
+    baseline = compute_ou_baseline_coverage(games, ou_handicap_range)
+    if not baseline:
+        return patterns
+
+    for streak_length in range(cfg['streak_range'][0], cfg['streak_range'][1] + 1):
+        for streak_type in ['OVER', 'UNDER']:
+            continuation = compute_ou_streak_continuation(
+                games, teams, streak_length, streak_type, ou_handicap_range
+            )
+
+            for handicap in range(ou_handicap_range[0], ou_handicap_range[1] + 1):
+                covers, total = continuation[handicap]
+                if total < cfg['min_sample']:
+                    continue
+
+                cover_rate = covers / total
+                baseline_rate = baseline.get(handicap, 0.5)
+                edge = cover_rate - baseline_rate
+
+                if abs(edge) < cfg['min_edge']:
+                    continue
+
+                pattern_type = 'streak_ride' if edge > 0 else 'streak_fade'
+
+                patterns.append({
+                    'sport': sport,
+                    'market_type': 'ou',
+                    'pattern_type': pattern_type,
+                    'streak_type': streak_type,
+                    'streak_length': streak_length,
+                    'handicap': handicap,
+                    'cover_rate': cover_rate,
+                    'baseline_rate': baseline_rate,
+                    'edge': edge,
+                    'sample_size': total,
+                    'confidence': get_confidence(total, edge),
+                })
+
+    return patterns
+
+
+def compute_tt_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 10)) -> Dict[int, float]:
+    """Compute baseline TT OVER cover rates at each handicap level."""
+    baseline = {}
+
+    # Pool all TT margins (home + away)
+    all_margins = []
+    for g in games:
+        for col in ['home_team_total_result', 'away_team_total_result']:
+            m = g.get(col)
+            if m is not None and m != 0:
+                all_margins.append(m)
+
+    if not all_margins:
+        return baseline
+
+    for handicap in range(handicap_range[0], handicap_range[1] + 1):
+        covers = sum(1 for m in all_margins if m > -handicap)
+        total = len(all_margins)
+        baseline[handicap] = covers / total if total > 0 else 0.5
+
+    return baseline
+
+
+def compute_tt_streak_continuation(
+    games: List[Dict],
+    teams: Set[str],
+    streak_length: int,
+    streak_type: str,
+    handicap_range: Tuple[int, int] = (0, 10)
+) -> Dict[int, Tuple[int, int]]:
+    """
+    Compute TT OVER cover counts at each handicap for games following a TT streak.
+
+    Uses ride direction: after OVER streak, check if next game TT margin > -h (OVER covers).
+
+    Returns: {handicap: (covers, total)}
+    """
+    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+
+    target_is_over = (streak_type == 'OVER')
+
+    for team in teams:
+        team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
+        if len(team_games) < streak_length + 1:
+            continue
+
+        from datetime import datetime as dt
+        def get_date(g):
+            d = g['game_date']
+            if isinstance(d, str):
+                return dt.strptime(d, '%Y-%m-%d').date()
+            return d
+
+        team_games.sort(key=get_date)
+
+        # Build per-game TT results
+        game_data = []
+        for g in team_games:
+            is_home = g['home_team'] == team
+            margin = g.get('home_team_total_result') if is_home else g.get('away_team_total_result')
+            if margin is None or margin == 0:
+                game_data.append({'margin': None, 'is_over': None})
+            else:
+                game_data.append({'margin': margin, 'is_over': margin > 0})
+
+        for i in range(streak_length, len(game_data)):
+            if game_data[i]['margin'] is None:
+                continue
+
+            streak_len = 0
+            for j in range(i - 1, -1, -1):
+                if game_data[j]['is_over'] is None:
+                    break
+                if game_data[j]['is_over'] == target_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_len >= streak_length:
+                margin = game_data[i]['margin']
+                for handicap in range(handicap_range[0], handicap_range[1] + 1):
+                    # Ride direction: OVER streak -> OVER covers if margin > -h
+                    if streak_type == 'OVER':
+                        covered = margin > -handicap
+                    else:  # UNDER streak -> UNDER covers if margin < h
+                        covered = margin < handicap
+
+                    results[handicap][1] += 1
+                    if covered:
+                        results[handicap][0] += 1
+
+    return {h: tuple(v) for h, v in results.items()}
+
+
+def detect_tt_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
+    """Detect all significant TT streak patterns for a sport."""
+    cfg = PATTERN_CONFIG
+    tt_handicap_range = (0, 10)
+    patterns = []
+
+    teams = set()
+    for g in games:
+        teams.add(g['home_team'])
+        teams.add(g['away_team'])
+
+    baseline = compute_tt_baseline_coverage(games, tt_handicap_range)
+    if not baseline:
+        return patterns
+
+    for streak_length in range(cfg['streak_range'][0], cfg['streak_range'][1] + 1):
+        for streak_type in ['OVER', 'UNDER']:
+            continuation = compute_tt_streak_continuation(
+                games, teams, streak_length, streak_type, tt_handicap_range
+            )
+
+            for handicap in range(tt_handicap_range[0], tt_handicap_range[1] + 1):
+                covers, total = continuation[handicap]
+                if total < cfg['min_sample']:
+                    continue
+
+                cover_rate = covers / total
+                baseline_rate = baseline.get(handicap, 0.5)
+                edge = cover_rate - baseline_rate
+
+                if abs(edge) < cfg['min_edge']:
+                    continue
+
+                pattern_type = 'streak_ride' if edge > 0 else 'streak_fade'
+
+                patterns.append({
+                    'sport': sport,
+                    'market_type': 'tt',
+                    'pattern_type': pattern_type,
+                    'streak_type': streak_type,
+                    'streak_length': streak_length,
+                    'handicap': handicap,
+                    'cover_rate': cover_rate,
+                    'baseline_rate': baseline_rate,
+                    'edge': edge,
+                    'sample_size': total,
+                    'confidence': get_confidence(total, edge),
+                })
+
+    return patterns
+
+
 def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime) -> int:
     """Write detected patterns to database."""
     if not patterns:
         return 0
 
-    # Clear old patterns for these sports first
-    sports = set(p['sport'] for p in patterns)
-    delete_sql = text("DELETE FROM detected_patterns WHERE sport = :sport")
+    # Clear old patterns for these sport+market_type combos
+    sport_markets = set((p['sport'], p.get('market_type', 'ats')) for p in patterns)
+    delete_sql = text("DELETE FROM detected_patterns WHERE sport = :sport AND market_type = :market_type")
 
     upsert_sql = text("""
         INSERT INTO detected_patterns
-        (sport, pattern_type, streak_type, streak_length, handicap,
+        (sport, market_type, pattern_type, streak_type, streak_length, handicap,
          cover_rate, baseline_rate, edge, sample_size, confidence, computed_at)
-        VALUES (:sport, :pattern_type, :streak_type, :streak_length, :handicap,
+        VALUES (:sport, :market_type, :pattern_type, :streak_type, :streak_length, :handicap,
                 :cover_rate, :baseline_rate, :edge, :sample_size, :confidence, :computed_at)
-        ON CONFLICT (sport, pattern_type, streak_type, streak_length, handicap)
+        ON CONFLICT (sport, market_type, pattern_type, streak_type, streak_length, handicap)
         DO UPDATE SET
             cover_rate = EXCLUDED.cover_rate,
             baseline_rate = EXCLUDED.baseline_rate,
@@ -535,6 +964,7 @@ def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime)
     for p in patterns:
         rows.append({
             'sport': p['sport'],
+            'market_type': p.get('market_type', 'ats'),
             'pattern_type': p['pattern_type'],
             'streak_type': p['streak_type'],
             'streak_length': p['streak_length'],
@@ -548,8 +978,8 @@ def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime)
         })
 
     with engine.begin() as conn:
-        for sport in sports:
-            conn.execute(delete_sql, {'sport': sport})
+        for sport, market_type in sport_markets:
+            conn.execute(delete_sql, {'sport': sport, 'market_type': market_type})
         if rows:
             conn.execute(upsert_sql, rows)
 
@@ -654,29 +1084,64 @@ def process_sport(engine, sport: str, computed_at: datetime) -> Dict[str, Any]:
     for i, r in enumerate(rankings):
         r['ats_rank'] = i + 1
 
-    # Compute streaks
+    # Compute ATS streaks
     streaks = {}
     for team in teams:
         length, stype = compute_current_streak(games, team)
         streaks[team] = (length, stype)
 
-    # Detect patterns
-    logger.info(f"  Detecting patterns...")
-    patterns = detect_patterns_for_sport(games, sport)
-    logger.info(f"  Found {len(patterns)} significant patterns")
+    # Compute O/U streaks
+    ou_streaks = {}
+    for team in teams:
+        length, stype = compute_current_ou_streak(games, team)
+        if length > 0:
+            ou_streaks[team] = (length, stype)
+
+    # Compute TT streaks
+    tt_streaks = {}
+    for team in teams:
+        length, stype = compute_current_tt_streak(games, team)
+        if length > 0:
+            tt_streaks[team] = (length, stype)
+
+    # Detect ATS patterns
+    logger.info(f"  Detecting ATS patterns...")
+    ats_patterns = detect_patterns_for_sport(games, sport)
+    # Tag ATS patterns with market_type
+    for p in ats_patterns:
+        p['market_type'] = 'ats'
+    logger.info(f"  Found {len(ats_patterns)} ATS patterns")
+
+    # Detect O/U patterns
+    logger.info(f"  Detecting O/U patterns...")
+    ou_patterns = detect_ou_patterns_for_sport(games, sport)
+    logger.info(f"  Found {len(ou_patterns)} O/U patterns")
+
+    # Detect TT patterns
+    logger.info(f"  Detecting TT patterns...")
+    tt_patterns = detect_tt_patterns_for_sport(games, sport)
+    logger.info(f"  Found {len(tt_patterns)} TT patterns")
+
+    all_patterns = ats_patterns + ou_patterns + tt_patterns
 
     # Write to database
     rankings_written = write_current_rankings(engine, sport, rankings, computed_at)
     streaks_written = write_current_streaks(engine, sport, streaks, computed_at)
-    patterns_written = write_detected_patterns(engine, patterns, computed_at)
+    ou_streaks_written = write_current_ou_streaks(engine, sport, ou_streaks, computed_at)
+    tt_streaks_written = write_current_tt_streaks(engine, sport, tt_streaks, computed_at)
+    patterns_written = write_detected_patterns(engine, all_patterns, computed_at)
 
-    logger.info(f"  Wrote {rankings_written} rankings, {streaks_written} streaks, {patterns_written} patterns")
+    logger.info(f"  Wrote {rankings_written} rankings, {streaks_written} ATS streaks, "
+                f"{ou_streaks_written} O/U streaks, {tt_streaks_written} TT streaks, "
+                f"{patterns_written} patterns")
 
     return {
         'sport': sport,
         'teams': len(teams),
         'rankings': rankings_written,
         'streaks': streaks_written,
+        'ou_streaks': ou_streaks_written,
+        'tt_streaks': tt_streaks_written,
         'patterns': patterns_written,
     }
 
@@ -704,7 +1169,7 @@ def generate_todays_recommendations(engine, computed_at: datetime) -> int:
 
     try:
         from src.analysis.todays_recommendations import generate_recommendations, write_todays_recommendations
-        from src.analysis.insights import get_cached_patterns
+        from src.analysis.insights import get_cached_patterns, get_cached_ou_patterns, get_cached_tt_patterns
     except ImportError as e:
         logger.warning(f"Could not import recommendation modules: {e}")
         return 0
@@ -712,15 +1177,20 @@ def generate_todays_recommendations(engine, computed_at: datetime) -> int:
     # Get cached patterns (already computed by process_sport)
     with engine.connect() as conn:
         patterns = get_cached_patterns(conn, min_sample=30, min_edge=0.05)
+        ou_patterns = get_cached_ou_patterns(conn, min_sample=30, min_edge=0.05)
+        tt_patterns = get_cached_tt_patterns(conn, min_sample=30, min_edge=0.05)
 
-    logger.info(f"  Found {len(patterns)} cached patterns")
+    logger.info(f"  Found {len(patterns)} ATS, {len(ou_patterns)} O/U, {len(tt_patterns)} TT cached patterns")
 
     # Generate recommendations for all sports
     all_recommendations = []
     with engine.connect() as conn:
         for sport in SPORTS:
             try:
-                sport_recs = generate_recommendations(conn, sport, patterns, [])
+                sport_recs = generate_recommendations(
+                    conn, sport, patterns,
+                    ou_patterns=ou_patterns, tt_patterns=tt_patterns
+                )
                 all_recommendations.extend(sport_recs)
                 logger.info(f"  {sport}: {len(sport_recs)} games analyzed")
             except Exception as e:

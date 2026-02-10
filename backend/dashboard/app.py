@@ -75,6 +75,11 @@ from src.analysis.metrics import (
     ou_streak_continuation_analysis,
     baseline_ou_coverage,
     ou_streak_summary_all_lengths,
+    # Team totals streak analysis
+    tt_streak_summary_all_lengths,
+    tt_streak_continuation_analysis,
+    tt_baseline_coverage,
+    convergent_gt_analysis,
 )
 from src.analysis.aggregations import (
     macro_ats_summary,
@@ -92,8 +97,12 @@ from src.analysis.insights import (
     get_current_streaks,
     get_cached_streaks,
     get_cached_patterns,
+    get_cached_ou_patterns,
+    get_cached_tt_patterns,
     get_current_ou_streaks,
     get_cached_ou_streaks,
+    get_current_tt_streaks,
+    get_cached_tt_streaks,
 )
 from src.analysis.network_ratings import (
     get_team_rankings,
@@ -179,6 +188,30 @@ def cached_ou_streak_continuation(_conn, sport: str, streak_length: int, streak_
 def cached_baseline_ou_coverage(_conn, sport: str):
     """Cached baseline O/U coverage."""
     return baseline_ou_coverage(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_tt_streak_summary(_conn, sport: str):
+    """Cached team totals streak summary."""
+    return tt_streak_summary_all_lengths(_conn, sport)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_tt_streak_continuation(_conn, sport: str, streak_length: int, streak_type: str, direction: str):
+    """Cached team totals streak continuation analysis."""
+    return tt_streak_continuation_analysis(_conn, sport, streak_length, streak_type, direction=direction)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_tt_baseline_coverage(_conn, sport: str, direction: str):
+    """Cached team totals baseline coverage."""
+    return tt_baseline_coverage(_conn, sport, direction=direction)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def cached_convergent_gt(_conn, sport: str, combo_dir: str, min_streak_a: int, min_streak_b: int, direction: str):
+    """Cached convergent game total analysis."""
+    return convergent_gt_analysis(_conn, sport, combo_dir, min_streak_a, min_streak_b, direction=direction)
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -1092,131 +1125,299 @@ def page_streak_analysis():
                 st.warning(f"No {streak_length}-game {streak_type} streaks found")
 
     # =========================================================================
-    # TOTALS STREAKS (O/U)
+    # TOTALS STREAKS (Team Totals)
     # =========================================================================
     with streak_type_tabs[1]:
-        st.markdown(f"""
-        **Question:** After a team goes OVER/UNDER X games in a row,
-        how does their next game perform across different handicaps (0-20 points)?
+        totals_tabs = st.tabs(["Individual TT Streaks", "Convergent Matchups"])
 
-        Select a streak length and type, then see O/U cover rates at every handicap level for **{selected_sport}**.
-        """)
+        # =================================================================
+        # Individual Team Totals Streaks
+        # =================================================================
+        with totals_tabs[0]:
+            st.markdown(f"""
+            **Team Totals** track each team's individual score vs their own O/U line
+            (e.g., "Lakers O/U 115.5"), NOT the combined game total.
 
-        # First, show available O/U streak data (cached)
-        with st.spinner("Loading O/U streak summary..."):
-            ou_summary = cached_ou_streak_summary(conn, selected_sport)
+            After a team goes OVER/UNDER their team total N+ games in a row,
+            how does their **next game's team total** perform? Analyzed with both
+            **RIDE** (bet with streak) and **FADE** (bet against) strategies for **{selected_sport}**.
+            """)
 
-        if len(ou_summary) == 0:
-            st.warning("No O/U streak data found")
-        else:
-            # Show summary table
-            st.subheader("Available O/U Streak Data")
+            # Load TT streak summary
+            with st.spinner("Loading team totals streak summary..."):
+                tt_summary = cached_tt_streak_summary(conn, selected_sport)
 
-            col1, col2 = st.columns(2)
+            if len(tt_summary) == 0:
+                st.warning("No team totals streak data found. Team total lines may not be available yet.")
+            else:
+                # Show summary tables
+                st.subheader("Available Team Totals Streak Data")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**OVER Streaks**")
+                    tt_over = tt_summary[tt_summary['streak_type'] == 'OVER'][['streak_length', 'situations']]
+                    tt_over.columns = ['Streak Length', 'Situations']
+                    st.dataframe(tt_over, hide_index=True)
+
+                with col2:
+                    st.markdown("**UNDER Streaks**")
+                    tt_under = tt_summary[tt_summary['streak_type'] == 'UNDER'][['streak_length', 'situations']]
+                    tt_under.columns = ['Streak Length', 'Situations']
+                    st.dataframe(tt_under, hide_index=True)
+
+                # Controls
+                st.markdown("---")
+                st.subheader("Analyze Team Total Coverage After Streak")
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    tt_streak_len = st.selectbox("Streak Length", list(range(1, 11)), index=2, key="tt_streak_len")
+                with col2:
+                    tt_streak_type = st.selectbox("Streak Type", ["OVER", "UNDER"], key="tt_streak_type")
+
+                tt_opposite = "UNDER" if tt_streak_type == "OVER" else "OVER"
+
+                # Sample size
+                tt_sel = tt_summary[(tt_summary['streak_length'] == tt_streak_len) & (tt_summary['streak_type'] == tt_streak_type)]
+                if len(tt_sel) > 0:
+                    # Sum situations for this length and above (N+ analysis)
+                    tt_n_plus = tt_summary[(tt_summary['streak_length'] >= tt_streak_len) & (tt_summary['streak_type'] == tt_streak_type)]
+                    tt_sample = int(tt_n_plus['situations'].sum())
+                    st.info(f"Sample size: **{tt_sample}** situations where a team had a {tt_streak_len}+ game TT {tt_streak_type} streak")
+
+                    # Load analysis data
+                    with st.spinner("Analyzing team totals coverage..."):
+                        tt_ride = cached_tt_streak_continuation(conn, selected_sport, tt_streak_len, tt_streak_type, 'ride')
+                        tt_fade = cached_tt_streak_continuation(conn, selected_sport, tt_streak_len, tt_streak_type, 'fade')
+                        tt_bl_over = cached_tt_baseline_coverage(conn, selected_sport, 'over')
+                        tt_bl_under = cached_tt_baseline_coverage(conn, selected_sport, 'under')
+
+                    # Pick the correct baseline for each direction
+                    ride_bl = tt_bl_over if tt_streak_type == "OVER" else tt_bl_under
+                    fade_bl = tt_bl_under if tt_streak_type == "OVER" else tt_bl_over
+
+                    # --- RIDE Chart ---
+                    if len(tt_ride) > 0 and len(ride_bl) > 0:
+                        tt_ride = tt_ride.merge(ride_bl[['handicap', 'baseline_cover_pct']], on='handicap')
+                        tt_ride['edge'] = tt_ride['cover_pct'] - tt_ride['baseline_cover_pct']
+
+                        st.subheader(f"After {tt_streak_len}+ Game TT {tt_streak_type} Streak — Bet {tt_streak_type} (Ride)")
+
+                        fig_ride = go.Figure()
+                        fig_ride.add_trace(go.Bar(
+                            name=f'TT {tt_streak_type} Coverage (Ride)',
+                            x=tt_ride['handicap'],
+                            y=tt_ride['cover_pct'] * 100,
+                            marker_color=['#2ecc71' if e >= 0 else '#e74c3c' for e in tt_ride['edge']],
+                            text=tt_ride['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                            textposition='outside'
+                        ))
+                        fig_ride.add_trace(go.Scatter(
+                            name=f'{selected_sport} TT Baseline ({tt_streak_type})',
+                            x=ride_bl['handicap'],
+                            y=ride_bl['baseline_cover_pct'] * 100,
+                            mode='lines+markers',
+                            line=dict(color='#3498db', width=3),
+                            marker=dict(size=8)
+                        ))
+                        fig_ride.update_layout(
+                            xaxis_title="Handicap (points)",
+                            yaxis_title="Cover Rate (%)",
+                            yaxis=dict(range=[0, 100]),
+                            height=500,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                            barmode='overlay'
+                        )
+                        st.plotly_chart(fig_ride, use_container_width=True)
+
+                        with st.expander("View Ride Data Table"):
+                            d = tt_ride.copy()
+                            d['cover_pct_fmt'] = d['cover_pct'].apply(lambda x: f"{x:.1%}")
+                            d['baseline_fmt'] = d['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                            d['edge_fmt'] = d['edge'].apply(lambda x: f"{x*100:+.1f}%")
+                            d = d.rename(columns={'handicap': 'Handicap', 'covers': 'Covers', 'total': 'Total',
+                                                   'cover_pct_fmt': 'Cover %', 'baseline_fmt': 'Baseline %', 'edge_fmt': 'Edge'})
+                            st.dataframe(d[['Handicap', 'Total', 'Covers', 'Cover %', 'Baseline %', 'Edge']], hide_index=True)
+
+                    # --- FADE Chart ---
+                    if len(tt_fade) > 0 and len(fade_bl) > 0:
+                        tt_fade = tt_fade.merge(fade_bl[['handicap', 'baseline_cover_pct']], on='handicap')
+                        tt_fade['edge'] = tt_fade['cover_pct'] - tt_fade['baseline_cover_pct']
+
+                        st.subheader(f"After {tt_streak_len}+ Game TT {tt_streak_type} Streak — Bet {tt_opposite} (Fade)")
+
+                        fig_fade = go.Figure()
+                        fig_fade.add_trace(go.Bar(
+                            name=f'TT {tt_opposite} Coverage (Fade)',
+                            x=tt_fade['handicap'],
+                            y=tt_fade['cover_pct'] * 100,
+                            marker_color=['#2ecc71' if e >= 0 else '#e74c3c' for e in tt_fade['edge']],
+                            text=tt_fade['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                            textposition='outside'
+                        ))
+                        fig_fade.add_trace(go.Scatter(
+                            name=f'{selected_sport} TT Baseline ({tt_opposite})',
+                            x=fade_bl['handicap'],
+                            y=fade_bl['baseline_cover_pct'] * 100,
+                            mode='lines+markers',
+                            line=dict(color='#3498db', width=3),
+                            marker=dict(size=8)
+                        ))
+                        fig_fade.update_layout(
+                            xaxis_title="Handicap (points)",
+                            yaxis_title="Cover Rate (%)",
+                            yaxis=dict(range=[0, 100]),
+                            height=500,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                            barmode='overlay'
+                        )
+                        st.plotly_chart(fig_fade, use_container_width=True)
+
+                        with st.expander("View Fade Data Table"):
+                            d = tt_fade.copy()
+                            d['cover_pct_fmt'] = d['cover_pct'].apply(lambda x: f"{x:.1%}")
+                            d['baseline_fmt'] = d['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                            d['edge_fmt'] = d['edge'].apply(lambda x: f"{x*100:+.1f}%")
+                            d = d.rename(columns={'handicap': 'Handicap', 'covers': 'Covers', 'total': 'Total',
+                                                   'cover_pct_fmt': 'Cover %', 'baseline_fmt': 'Baseline %', 'edge_fmt': 'Edge'})
+                            st.dataframe(d[['Handicap', 'Total', 'Covers', 'Cover %', 'Baseline %', 'Edge']], hide_index=True)
+
+                    if len(tt_ride) == 0 and len(tt_fade) == 0:
+                        st.warning("No data found for this streak configuration")
+                else:
+                    st.warning(f"No {tt_streak_len}-game TT {tt_streak_type} streaks found")
+
+        # =================================================================
+        # Convergent Matchups
+        # =================================================================
+        with totals_tabs[1]:
+            st.markdown(f"""
+            **Convergent Matchups** — When **both teams** enter a game on same-direction
+            team total streaks, how does the **game total** (combined score) perform?
+
+            Streak lengths can differ — e.g., one team on a 3-game TT UNDER streak
+            and the other on a 2-game streak. Analyzed for **{selected_sport}**.
+            """)
+
+            col1, col2, col3 = st.columns(3)
             with col1:
-                st.markdown("**OVER Streaks**")
-                over_summary = ou_summary[ou_summary['streak_type'] == 'OVER'][['streak_length', 'situations']]
-                over_summary.columns = ['Streak Length', 'Situations']
-                st.dataframe(over_summary, hide_index=True)
-
+                conv_dir = st.selectbox("Both Teams On", ["OVER", "UNDER"], key="conv_dir")
             with col2:
-                st.markdown("**UNDER Streaks**")
-                under_summary = ou_summary[ou_summary['streak_type'] == 'UNDER'][['streak_length', 'situations']]
-                under_summary.columns = ['Streak Length', 'Situations']
-                st.dataframe(under_summary, hide_index=True)
+                conv_min_a = st.selectbox("Team A Min Streak", list(range(1, 6)), index=1, key="conv_min_a")
+            with col3:
+                conv_min_b = st.selectbox("Team B Min Streak", list(range(1, 6)), index=1, key="conv_min_b")
 
-            # Select streak to analyze
-            st.markdown("---")
-            st.subheader("Analyze O/U Coverage After Streak")
+            conv_opposite = "UNDER" if conv_dir == "OVER" else "OVER"
 
-            col1, col2 = st.columns(2)
-            with col1:
-                ou_streak_length = st.selectbox("Streak Length", list(range(2, 11)), index=0, key="ou_streak_len")
-            with col2:
-                ou_streak_type = st.selectbox("Streak Type", ["OVER", "UNDER"], key="ou_streak_type")
+            # Sort so the lower streak is always first for cache consistency
+            lo_streak, hi_streak = sorted([conv_min_a, conv_min_b])
+            streak_label = f"{hi_streak}+ / {lo_streak}+" if lo_streak != hi_streak else f"{lo_streak}+"
 
-            # Check sample size
-            ou_selected_summary = ou_summary[(ou_summary['streak_length'] == ou_streak_length) & (ou_summary['streak_type'] == ou_streak_type)]
-            if len(ou_selected_summary) > 0:
-                ou_sample_size = ou_selected_summary['situations'].values[0]
-                st.info(f"Sample size: **{ou_sample_size}** situations where a team had a {ou_streak_length}-game {ou_streak_type} streak")
+            with st.spinner("Analyzing convergent matchups..."):
+                conv_ride = cached_convergent_gt(conn, selected_sport, conv_dir, lo_streak, hi_streak, 'ride')
+                conv_fade = cached_convergent_gt(conn, selected_sport, conv_dir, lo_streak, hi_streak, 'fade')
 
-                # Run handicap analysis (cached for speed)
-                with st.spinner("Analyzing O/U handicap coverage..."):
-                    ou_handicap_data = cached_ou_streak_continuation(conn, selected_sport, ou_streak_length, ou_streak_type)
-                    ou_baseline_data = cached_baseline_ou_coverage(conn, selected_sport)
+            if len(conv_ride) > 0:
+                n_games = conv_ride['n_games'].iloc[0]
+                st.info(f"Found **{n_games}** games where both teams were on TT {conv_dir} streaks ({streak_label})")
 
-                if len(ou_handicap_data) > 0:
-                    # Merge baseline into handicap data
-                    ou_handicap_data = ou_handicap_data.merge(ou_baseline_data[['handicap', 'baseline_cover_pct']], on='handicap')
-                    ou_handicap_data['edge_vs_baseline'] = ou_handicap_data['cover_pct'] - ou_handicap_data['baseline_cover_pct']
+                # We need a GT baseline for comparison
+                # Use baseline_ou_coverage (game total baseline) already available
+                gt_bl_ride_dir = 'over' if conv_dir == 'OVER' else 'under'
+                gt_bl_fade_dir = 'under' if conv_dir == 'OVER' else 'over'
+                gt_bl_ride = cached_baseline_ou_coverage(conn, selected_sport)  # default is OVER direction
+                # Re-fetch with correct direction params
+                gt_bl_ride = baseline_ou_coverage(conn, selected_sport, handicap_range=(0, 20), direction=gt_bl_ride_dir)
+                gt_bl_fade = baseline_ou_coverage(conn, selected_sport, handicap_range=(0, 20), direction=gt_bl_fade_dir)
 
-                    # Chart: Cover rate by handicap with baseline comparison
-                    st.subheader(f"Next Game O/U Cover Rate by Handicap (After {ou_streak_length}-Game {ou_streak_type} Streak)")
+                # --- RIDE Chart ---
+                if len(gt_bl_ride) > 0:
+                    conv_ride_m = conv_ride.merge(gt_bl_ride[['handicap', 'baseline_cover_pct']], on='handicap')
+                    conv_ride_m['edge'] = conv_ride_m['cover_pct'] - conv_ride_m['baseline_cover_pct']
 
-                    fig = go.Figure()
+                    st.subheader(f"Both {conv_dir} {streak_label} — Game Total: Bet {conv_dir} (Ride)")
 
-                    # Bars for streak cover rate - color based on vs baseline
-                    fig.add_trace(go.Bar(
-                        name=f'After {ou_streak_length}-Game {ou_streak_type} Streak',
-                        x=ou_handicap_data['handicap'],
-                        y=ou_handicap_data['cover_pct'] * 100,
-                        marker_color=['#e74c3c' if edge < 0 else '#2ecc71' for edge in ou_handicap_data['edge_vs_baseline']],
-                        text=ou_handicap_data['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                    fig_cr = go.Figure()
+                    fig_cr.add_trace(go.Bar(
+                        name=f'GT {conv_dir} Coverage (n={n_games})',
+                        x=conv_ride_m['handicap'],
+                        y=conv_ride_m['cover_pct'] * 100,
+                        marker_color=['#2ecc71' if e >= 0 else '#e74c3c' for e in conv_ride_m['edge']],
+                        text=conv_ride_m['cover_pct'].apply(lambda x: f"{x:.1%}"),
                         textposition='outside'
                     ))
-
-                    # Baseline trend line
-                    fig.add_trace(go.Scatter(
-                        name=f'{selected_sport} Baseline',
-                        x=ou_baseline_data['handicap'],
-                        y=ou_baseline_data['baseline_cover_pct'] * 100,
+                    fig_cr.add_trace(go.Scatter(
+                        name=f'{selected_sport} GT Baseline ({conv_dir})',
+                        x=gt_bl_ride['handicap'],
+                        y=gt_bl_ride['baseline_cover_pct'] * 100,
                         mode='lines+markers',
-                        line=dict(color='#3498db', width=3, dash='solid'),
+                        line=dict(color='#3498db', width=3),
                         marker=dict(size=8)
                     ))
-
-                    fig.update_layout(
-                        xaxis_title="Handicap (points added to total)",
-                        yaxis_title="OVER Cover Rate (%)",
+                    fig_cr.update_layout(
+                        xaxis_title="Handicap (points)",
+                        yaxis_title="Cover Rate (%)",
                         yaxis=dict(range=[0, 100]),
                         height=500,
                         legend=dict(orientation="h", yanchor="bottom", y=1.02),
                         barmode='overlay'
                     )
+                    st.plotly_chart(fig_cr, use_container_width=True)
 
-                    st.plotly_chart(fig, use_container_width=True)
+                    with st.expander("View Ride Data Table"):
+                        d = conv_ride_m.copy()
+                        d['cover_pct_fmt'] = d['cover_pct'].apply(lambda x: f"{x:.1%}")
+                        d['baseline_fmt'] = d['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                        d['edge_fmt'] = d['edge'].apply(lambda x: f"{x*100:+.1f}%")
+                        d = d.rename(columns={'handicap': 'Handicap', 'covers': 'Covers', 'total': 'Total',
+                                               'cover_pct_fmt': 'Cover %', 'baseline_fmt': 'Baseline %', 'edge_fmt': 'Edge'})
+                        st.dataframe(d[['Handicap', 'Total', 'Covers', 'Cover %', 'Baseline %', 'Edge']], hide_index=True)
 
-                    # Interpretation
-                    st.markdown(f"""
-                    **How to read this chart:**
-                    - **Bars** = OVER cover rate after a {ou_streak_length}-game {ou_streak_type} streak
-                    - **Blue line** = League-wide baseline OVER cover rate at each handicap
-                    - **Green bars** = streak situations OUTPERFORM the baseline (potential edge)
-                    - **Red bars** = streak situations UNDERPERFORM the baseline (fade opportunity)
+                # --- FADE Chart ---
+                if len(conv_fade) > 0 and len(gt_bl_fade) > 0:
+                    conv_fade_m = conv_fade.merge(gt_bl_fade[['handicap', 'baseline_cover_pct']], on='handicap')
+                    conv_fade_m['edge'] = conv_fade_m['cover_pct'] - conv_fade_m['baseline_cover_pct']
 
-                    **Key insight:** Where the bars exceed the blue line, there may be a betting edge.
-                    """)
+                    st.subheader(f"Both {conv_dir} {streak_label} — Game Total: Bet {conv_opposite} (Fade)")
 
-                    # Data table
-                    with st.expander("View Data Table"):
-                        display = ou_handicap_data.copy()
-                        display['cover_pct_fmt'] = display['cover_pct'].apply(lambda x: f"{x:.1%}")
-                        display['baseline_fmt'] = display['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
-                        display['edge_fmt'] = display['edge_vs_baseline'].apply(lambda x: f"{x*100:+.1f}%")
-                        display = display.rename(columns={
-                            'handicap': 'Handicap',
-                            'covers': 'Covers',
-                            'total': 'Total',
-                            'cover_pct_fmt': 'Streak Cover %',
-                            'baseline_fmt': 'Baseline %',
-                            'edge_fmt': 'Edge vs Baseline'
-                        })
-                        st.dataframe(display[['Handicap', 'Total', 'Covers', 'Streak Cover %', 'Baseline %', 'Edge vs Baseline']], hide_index=True)
-                else:
-                    st.warning("No data found")
+                    fig_cf = go.Figure()
+                    fig_cf.add_trace(go.Bar(
+                        name=f'GT {conv_opposite} Coverage (n={n_games})',
+                        x=conv_fade_m['handicap'],
+                        y=conv_fade_m['cover_pct'] * 100,
+                        marker_color=['#2ecc71' if e >= 0 else '#e74c3c' for e in conv_fade_m['edge']],
+                        text=conv_fade_m['cover_pct'].apply(lambda x: f"{x:.1%}"),
+                        textposition='outside'
+                    ))
+                    fig_cf.add_trace(go.Scatter(
+                        name=f'{selected_sport} GT Baseline ({conv_opposite})',
+                        x=gt_bl_fade['handicap'],
+                        y=gt_bl_fade['baseline_cover_pct'] * 100,
+                        mode='lines+markers',
+                        line=dict(color='#3498db', width=3),
+                        marker=dict(size=8)
+                    ))
+                    fig_cf.update_layout(
+                        xaxis_title="Handicap (points)",
+                        yaxis_title="Cover Rate (%)",
+                        yaxis=dict(range=[0, 100]),
+                        height=500,
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+                        barmode='overlay'
+                    )
+                    st.plotly_chart(fig_cf, use_container_width=True)
+
+                    with st.expander("View Fade Data Table"):
+                        d = conv_fade_m.copy()
+                        d['cover_pct_fmt'] = d['cover_pct'].apply(lambda x: f"{x:.1%}")
+                        d['baseline_fmt'] = d['baseline_cover_pct'].apply(lambda x: f"{x:.1%}")
+                        d['edge_fmt'] = d['edge'].apply(lambda x: f"{x*100:+.1f}%")
+                        d = d.rename(columns={'handicap': 'Handicap', 'covers': 'Covers', 'total': 'Total',
+                                               'cover_pct_fmt': 'Cover %', 'baseline_fmt': 'Baseline %', 'edge_fmt': 'Edge'})
+                        st.dataframe(d[['Handicap', 'Total', 'Covers', 'Cover %', 'Baseline %', 'Edge']], hide_index=True)
             else:
-                st.warning(f"No {ou_streak_length}-game {ou_streak_type} streaks found")
+                st.warning(f"No convergent matchups found where both teams were on TT {conv_dir} streaks ({streak_label})")
 
 
 # =============================================================================
@@ -1298,12 +1499,24 @@ def page_todays_picks():
                 with rating_col3:
                     st.caption(f"{game.sport} | {game.game_time}")
 
-                # Spread info
+                # Lines info (spread, total, team totals)
+                lines_parts = []
                 if game.spread is not None:
                     spread_display = f"+{game.spread}" if game.spread > 0 else str(game.spread)
-                    st.caption(f"Spread: {game.home_team} {spread_display} ({game.spread_source or 'Unknown'})")
+                    lines_parts.append(f"Spread: {game.home_team} {spread_display} ({game.spread_source or 'Unknown'})")
+                if game.total is not None:
+                    lines_parts.append(f"Total: {game.total} ({game.total_source or 'Unknown'})")
+                if game.home_team_total is not None or game.away_team_total is not None:
+                    tt_parts = []
+                    if game.away_team_total is not None:
+                        tt_parts.append(f"{game.away_team} {game.away_team_total}")
+                    if game.home_team_total is not None:
+                        tt_parts.append(f"{game.home_team} {game.home_team_total}")
+                    lines_parts.append(f"Team Totals: {' | '.join(tt_parts)}")
+                if lines_parts:
+                    st.caption(" | ".join(lines_parts))
 
-                # Recommendations - group by bet_on team
+                # Recommendations - group by bet_on
                 teams_recommended = {}
                 for rec in game.recommendations:
                     if rec.bet_on not in teams_recommended:
@@ -1317,19 +1530,19 @@ def page_todays_picks():
                     st.markdown(f"#### {conf_color} BET ON: {bet_team}")
 
                     for rec in recs:
-                        source_icon = "📈" if rec.source == "streak" else "🎯"
+                        source_icons = {
+                            'streak': '📈',
+                            'ou_streak': '🔄',
+                            'tt_streak': '👤',
+                        }
+                        source_icon = source_icons.get(rec.source, '📊')
                         st.markdown(f"- {source_icon} **{rec.source.replace('_', ' ').title()}**: {rec.rationale}")
 
                     st.caption(f"Combined Confidence: {combined_conf}")
 
-                # Team Details and O/U info in expander
-                with st.expander("Team Details & O/U Streaks"):
+                # Team Details and streak info in expander
+                with st.expander("Team Details & Streaks"):
                     detail_col1, detail_col2 = st.columns(2)
-
-                    # Get O/U streaks for both teams
-                    ou_streaks = get_current_ou_streaks(conn, game.sport)
-                    home_ou_streak = ou_streaks.get(game.home_team, {})
-                    away_ou_streak = ou_streaks.get(game.away_team, {})
 
                     with detail_col1:
                         st.markdown(f"**{game.home_team}** (Home)")
@@ -1340,11 +1553,17 @@ def page_todays_picks():
                         else:
                             st.write("No current ATS streak")
                         # O/U streak
-                        if home_ou_streak:
-                            ou_icon = "🟢" if home_ou_streak.get('streak_type') == 'OVER' else "🔴"
-                            st.write(f"O/U Streak: {ou_icon} {home_ou_streak.get('streak_length', 0)}-game {home_ou_streak.get('streak_type', 'N/A')}")
+                        if game.home_ou_streak:
+                            ou_icon = "🟢" if game.home_ou_streak[1] == 'OVER' else "🔴"
+                            st.write(f"O/U Streak: {ou_icon} {game.home_ou_streak[0]}-game {game.home_ou_streak[1]}")
                         else:
                             st.write("No current O/U streak")
+                        # TT streak
+                        if game.home_tt_streak:
+                            tt_icon = "🟢" if game.home_tt_streak[1] == 'OVER' else "🔴"
+                            st.write(f"TT Streak: {tt_icon} {game.home_tt_streak[0]}-game {game.home_tt_streak[1]}")
+                        else:
+                            st.write("No current TT streak")
 
                     with detail_col2:
                         st.markdown(f"**{game.away_team}** (Away)")
@@ -1355,11 +1574,17 @@ def page_todays_picks():
                         else:
                             st.write("No current ATS streak")
                         # O/U streak
-                        if away_ou_streak:
-                            ou_icon = "🟢" if away_ou_streak.get('streak_type') == 'OVER' else "🔴"
-                            st.write(f"O/U Streak: {ou_icon} {away_ou_streak.get('streak_length', 0)}-game {away_ou_streak.get('streak_type', 'N/A')}")
+                        if game.away_ou_streak:
+                            ou_icon = "🟢" if game.away_ou_streak[1] == 'OVER' else "🔴"
+                            st.write(f"O/U Streak: {ou_icon} {game.away_ou_streak[0]}-game {game.away_ou_streak[1]}")
                         else:
                             st.write("No current O/U streak")
+                        # TT streak
+                        if game.away_tt_streak:
+                            tt_icon = "🟢" if game.away_tt_streak[1] == 'OVER' else "🔴"
+                            st.write(f"TT Streak: {tt_icon} {game.away_tt_streak[0]}-game {game.away_tt_streak[1]}")
+                        else:
+                            st.write("No current TT streak")
 
                 st.markdown("---")
 
@@ -1381,10 +1606,10 @@ def page_todays_picks():
                 st.dataframe(streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
                 st.markdown("")
 
-    # O/U streaks (collapsible)
-    with st.expander("📈 All Current O/U Streaks"):
+    # O/U streaks (collapsible) - use cached for speed
+    with st.expander("🔄 All Current O/U Streaks"):
         for sport in ['NFL', 'NBA', 'NCAAM']:
-            ou_streaks = get_current_ou_streaks(conn, sport)
+            ou_streaks = get_cached_ou_streaks(conn, sport)
             if ou_streaks:
                 st.markdown(f"**{sport}**")
                 ou_streak_data = []
@@ -1398,6 +1623,25 @@ def page_todays_picks():
                     })
                 ou_streak_df = pd.DataFrame(ou_streak_data)
                 st.dataframe(ou_streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
+                st.markdown("")
+
+    # TT streaks (collapsible) - use cached for speed
+    with st.expander("👤 All Current Team Total Streaks"):
+        for sport in ['NFL', 'NBA', 'NCAAM']:
+            tt_streaks = get_cached_tt_streaks(conn, sport)
+            if tt_streaks:
+                st.markdown(f"**{sport}**")
+                tt_streak_data = []
+                for team, info in sorted(tt_streaks.items(), key=lambda x: -x[1]['streak_length']):
+                    tt_icon = "🟢" if info['streak_type'] == 'OVER' else "🔴"
+                    tt_streak_data.append({
+                        'Team': team,
+                        'Streak': f"{tt_icon} {info['streak_length']} {info['streak_type']}",
+                        'Length': info['streak_length'],
+                        'Type': info['streak_type']
+                    })
+                tt_streak_df = pd.DataFrame(tt_streak_data)
+                st.dataframe(tt_streak_df[['Team', 'Streak']], hide_index=True, use_container_width=True)
                 st.markdown("")
 
 
@@ -1929,20 +2173,19 @@ def page_current_streaks():
             st.dataframe(df_sorted[cols], use_container_width=True, hide_index=True)
 
     # =========================================================================
-    # TOTALS STREAKS TAB
+    # TEAM TOTALS STREAKS TAB
     # =========================================================================
     with streak_tabs[1]:
-        st.subheader("🎯 Current Totals Streaks")
-        st.caption(f"Track which {selected_sport} teams are currently running OVER or UNDER")
+        st.subheader("🎯 Current Team Totals Streaks")
+        st.caption(f"Track which {selected_sport} teams are running OVER or UNDER their individual team total line")
 
-        # Use cached O/U streaks for fast loads
-        ou_streaks = get_cached_ou_streaks(conn, selected_sport)
-        if not ou_streaks:
-            st.warning(f"No totals streak data available for {selected_sport}")
+        # Compute TT streaks (live — no pre-computed table yet)
+        tt_streaks = get_current_tt_streaks(conn, selected_sport)
+        if not tt_streaks:
+            st.warning(f"No team totals streak data available for {selected_sport}. Team total lines may not be collected yet.")
         else:
-            # Build dataframe (no ratings - O/U doesn't have equivalent power rankings)
             rows = []
-            for team, info in ou_streaks.items():
+            for team, info in tt_streaks.items():
                 rows.append({
                     'Team': team,
                     'Length': info['streak_length'],
@@ -1951,24 +2194,24 @@ def page_current_streaks():
                 })
             df = pd.DataFrame(rows)
 
-            sort_by = st.selectbox("Sort by", ["Length", "Team"], key="ou_sort")
+            sort_by = st.selectbox("Sort by", ["Length", "Team"], key="tt_sort")
             cols = ['Team', 'Length', 'Streak']
 
-            # Hot streaks (OVER)
-            st.subheader("🔥 Hot Streaks (2+ OVERs)")
+            # OVER streaks
+            st.subheader("🔥 TT OVER Streaks (2+)")
             hot = df[(df['Type'] == 'OVER') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
             if not hot.empty:
                 st.dataframe(hot[cols], use_container_width=True, hide_index=True)
             else:
-                st.info("No teams currently on 2+ game OVER streaks")
+                st.info("No teams currently on 2+ game TT OVER streaks")
 
-            # Cold streaks (UNDER)
-            st.subheader("❄️ Cold Streaks (2+ UNDERs)")
+            # UNDER streaks
+            st.subheader("❄️ TT UNDER Streaks (2+)")
             cold = df[(df['Type'] == 'UNDER') & (df['Length'] >= 2)].sort_values('Length', ascending=False)
             if not cold.empty:
                 st.dataframe(cold[cols], use_container_width=True, hide_index=True)
             else:
-                st.info("No teams currently on 2+ game UNDER streaks")
+                st.info("No teams currently on 2+ game TT UNDER streaks")
 
             # All teams
             st.subheader("📊 All Teams")

@@ -977,6 +977,414 @@ def ou_streak_summary_all_lengths(
 
 
 # =============================================================================
+# Team Totals (Individual O/U) Streak Analysis
+# =============================================================================
+
+def tt_streak_summary_all_lengths(
+    conn,
+    sport: str,
+    streak_range: tuple = (1, 10)
+) -> pd.DataFrame:
+    """
+    Get summary of team total O/U streak occurrences across all lengths.
+
+    Uses home_team_total_result / away_team_total_result to detect per-team
+    OVER/UNDER streaks (individual team score vs team total line).
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        streak_range: (min, max) streak lengths to count
+
+    Returns:
+        DataFrame with: streak_length, streak_type, situations
+    """
+    from ..database import get_games
+
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    # Need team total columns
+    for col in ['home_team_total_result', 'away_team_total_result']:
+        if col not in all_games.columns:
+            return pd.DataFrame()
+
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    counts = {}
+
+    for team in teams:
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < 2:
+            continue
+
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+
+        # Get TT result for each game (home or away perspective)
+        tt_results = []  # True=OVER, False=UNDER, None=push/missing
+        for _, row in team_games.iterrows():
+            is_home = row['home_team'] == team
+            margin = row['home_team_total_result'] if is_home else row['away_team_total_result']
+            if pd.isna(margin) or margin == 0:
+                tt_results.append(None)
+            else:
+                tt_results.append(margin > 0)  # True=OVER
+
+        # Count streaks going INTO each game
+        for i in range(1, len(tt_results)):
+            if tt_results[i] is None:
+                continue
+
+            # Walk backwards from i-1 to count streak
+            streak_len = 0
+            streak_is_over = None
+            for j in range(i - 1, -1, -1):
+                if tt_results[j] is None:
+                    break
+                if streak_is_over is None:
+                    streak_is_over = tt_results[j]
+                    streak_len = 1
+                elif tt_results[j] == streak_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_len >= streak_range[0] and streak_len <= streak_range[1]:
+                key = (streak_len, 'OVER' if streak_is_over else 'UNDER')
+                counts[key] = counts.get(key, 0) + 1
+
+    results = []
+    for (length, stype), count in sorted(counts.items()):
+        results.append({
+            'streak_length': length,
+            'streak_type': stype,
+            'situations': count
+        })
+
+    return pd.DataFrame(results)
+
+
+def tt_streak_continuation_analysis(
+    conn,
+    sport: str,
+    streak_length: int,
+    streak_type: str,
+    handicap_range: tuple = (0, 10),
+    direction: str = 'ride'
+) -> pd.DataFrame:
+    """
+    After a team total OVER/UNDER streak of N+, measure TT coverage in next game.
+
+    RIDE: bet same direction as streak
+      - OVER streak → OVER covers if margin > -h
+      - UNDER streak → UNDER covers if margin < h
+    FADE: bet opposite direction
+      - OVER streak → UNDER covers if margin < h
+      - UNDER streak → OVER covers if margin > -h
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        streak_length: Min streak length to look for (N+)
+        streak_type: 'OVER' or 'UNDER'
+        handicap_range: (min, max) handicap
+        direction: 'ride' or 'fade'
+
+    Returns:
+        DataFrame with: handicap, covers, total, cover_pct
+    """
+    from ..database import get_games
+
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    for col in ['home_team_total_result', 'away_team_total_result']:
+        if col not in all_games.columns:
+            return pd.DataFrame()
+
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    next_margins = []  # TT margins for next game after streak
+
+    for team in teams:
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) < streak_length + 1:
+            continue
+
+        team_games = team_games.sort_values('game_date').reset_index(drop=True)
+
+        # Build per-game TT results
+        game_data = []
+        for _, row in team_games.iterrows():
+            is_home = row['home_team'] == team
+            margin = row['home_team_total_result'] if is_home else row['away_team_total_result']
+            if pd.isna(margin) or margin == 0:
+                game_data.append({'margin': None, 'is_over': None})
+            else:
+                game_data.append({'margin': margin, 'is_over': margin > 0})
+
+        target_is_over = (streak_type == 'OVER')
+
+        for i in range(streak_length, len(game_data)):
+            # Skip if next game has no TT data
+            if game_data[i]['margin'] is None:
+                continue
+
+            # Count streak ending at i-1
+            streak_len = 0
+            for j in range(i - 1, -1, -1):
+                if game_data[j]['is_over'] is None:
+                    break
+                if game_data[j]['is_over'] == target_is_over:
+                    streak_len += 1
+                else:
+                    break
+
+            if streak_len >= streak_length:
+                next_margins.append(game_data[i]['margin'])
+
+    if not next_margins:
+        return pd.DataFrame()
+
+    # Calculate coverage at each handicap
+    results = []
+    for h in range(handicap_range[0], handicap_range[1] + 1):
+        covers = 0
+        for margin in next_margins:
+            if direction == 'ride':
+                if streak_type == 'OVER':
+                    covered = margin > -h  # OVER covers with h-pt cushion
+                else:  # UNDER
+                    covered = margin < h   # UNDER covers with h-pt cushion
+            else:  # fade
+                if streak_type == 'OVER':
+                    covered = margin < h   # Fade OVER = bet UNDER
+                else:  # UNDER
+                    covered = margin > -h  # Fade UNDER = bet OVER
+
+            if covered:
+                covers += 1
+
+        total = len(next_margins)
+        results.append({
+            'handicap': h,
+            'covers': covers,
+            'total': total,
+            'cover_pct': covers / total if total > 0 else 0
+        })
+
+    return pd.DataFrame(results)
+
+
+def tt_baseline_coverage(
+    conn,
+    sport: str,
+    handicap_range: tuple = (0, 10),
+    direction: str = 'over'
+) -> pd.DataFrame:
+    """
+    Baseline team total coverage rate across all games (no streak filter).
+
+    Pools all home_team_total_result + away_team_total_result values.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        handicap_range: (min, max) handicap
+        direction: 'over' or 'under'
+
+    Returns:
+        DataFrame with: handicap, baseline_covers, baseline_total, baseline_cover_pct
+    """
+    from ..database import get_games
+
+    games = get_games(conn, sport=sport)
+    if len(games) == 0:
+        return pd.DataFrame()
+
+    for col in ['home_team_total_result', 'away_team_total_result']:
+        if col not in games.columns:
+            return pd.DataFrame()
+
+    # Pool all TT margins (home + away), skip NaN and pushes
+    home_margins = games['home_team_total_result'].dropna()
+    away_margins = games['away_team_total_result'].dropna()
+    all_margins = pd.concat([home_margins, away_margins], ignore_index=True)
+    all_margins = all_margins[all_margins != 0]
+
+    if len(all_margins) == 0:
+        return pd.DataFrame()
+
+    results = []
+    for h in range(handicap_range[0], handicap_range[1] + 1):
+        if direction == 'over':
+            covers = (all_margins > -h).sum()
+        else:  # under
+            covers = (all_margins < h).sum()
+
+        total = len(all_margins)
+        results.append({
+            'handicap': h,
+            'baseline_covers': int(covers),
+            'baseline_total': total,
+            'baseline_cover_pct': covers / total if total > 0 else 0
+        })
+
+    return pd.DataFrame(results)
+
+
+def convergent_gt_analysis(
+    conn,
+    sport: str,
+    combo_dir: str,
+    min_streak_a: int,
+    min_streak_b: int = None,
+    handicap_range: tuple = (0, 20),
+    direction: str = 'ride'
+) -> pd.DataFrame:
+    """
+    When both teams enter on same-direction TT streaks, measure game total coverage.
+
+    For each game, compute both teams' TT streak going into it.
+    Filter: one team has min_streak_a+ and the other has min_streak_b+
+    (order doesn't matter — either team can fill either slot).
+
+    RIDE: bet same as combo_dir on the game total
+      - Both OVER → OVER covers if total_result > -h
+      - Both UNDER → UNDER covers if total_result < h
+    FADE: bet opposite
+      - Both OVER → UNDER covers if total_result < h
+      - Both UNDER → OVER covers if total_result > -h
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+        combo_dir: 'OVER' or 'UNDER' — both teams must be on this streak
+        min_streak_a: Minimum streak length for Team A
+        min_streak_b: Minimum streak length for Team B (defaults to min_streak_a)
+        handicap_range: (min, max) handicap
+        direction: 'ride' or 'fade'
+
+    Returns:
+        DataFrame with: handicap, covers, total, cover_pct, n_games
+    """
+    if min_streak_b is None:
+        min_streak_b = min_streak_a
+    from ..database import get_games
+
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return pd.DataFrame()
+
+    for col in ['home_team_total_result', 'away_team_total_result', 'total_result']:
+        if col not in all_games.columns:
+            return pd.DataFrame()
+
+    # Filter to games with TT and GT data
+    valid = all_games[
+        all_games['home_team_total_result'].notna() &
+        all_games['away_team_total_result'].notna() &
+        all_games['total_result'].notna()
+    ].copy()
+
+    if len(valid) == 0:
+        return pd.DataFrame()
+
+    teams = set(valid['home_team']) | set(valid['away_team'])
+    target_is_over = (combo_dir == 'OVER')
+
+    # Pre-compute TT history per team: list of (game_date, is_over) in order
+    team_tt_history = {}
+    for team in teams:
+        team_games = valid[
+            (valid['home_team'] == team) | (valid['away_team'] == team)
+        ].sort_values('game_date')
+
+        history = []
+        for _, row in team_games.iterrows():
+            is_home = row['home_team'] == team
+            margin = row['home_team_total_result'] if is_home else row['away_team_total_result']
+            if pd.isna(margin) or margin == 0:
+                history.append((row['game_date'], row['id'], None))
+            else:
+                history.append((row['game_date'], row['id'], margin > 0))
+        team_tt_history[team] = history
+
+    def get_streak_into_game(team, game_id):
+        """Get TT streak length for team going into a specific game."""
+        history = team_tt_history.get(team, [])
+        # Find the index of this game in the team's history
+        idx = None
+        for i, (gd, gid, is_over) in enumerate(history):
+            if gid == game_id:
+                idx = i
+                break
+        if idx is None or idx == 0:
+            return 0
+
+        streak_len = 0
+        for j in range(idx - 1, -1, -1):
+            if history[j][2] is None:
+                break
+            if history[j][2] == target_is_over:
+                streak_len += 1
+            else:
+                break
+        return streak_len
+
+    # Find convergent games
+    convergent_total_results = []
+    for _, game in valid.iterrows():
+        home_streak = get_streak_into_game(game['home_team'], game['id'])
+        away_streak = get_streak_into_game(game['away_team'], game['id'])
+
+        # Either team can fill either streak slot (order doesn't matter)
+        lo, hi = sorted([min_streak_a, min_streak_b])
+        s1, s2 = sorted([home_streak, away_streak])
+        if s1 >= lo and s2 >= hi:
+            convergent_total_results.append(game['total_result'])
+
+    if not convergent_total_results:
+        return pd.DataFrame()
+
+    # Calculate GT coverage at each handicap
+    results = []
+    for h in range(handicap_range[0], handicap_range[1] + 1):
+        covers = 0
+        for tr in convergent_total_results:
+            if direction == 'ride':
+                if combo_dir == 'OVER':
+                    covered = tr > -h  # OVER covers
+                else:
+                    covered = tr < h   # UNDER covers
+            else:  # fade
+                if combo_dir == 'OVER':
+                    covered = tr < h   # Fade OVER = bet UNDER
+                else:
+                    covered = tr > -h  # Fade UNDER = bet OVER
+
+            if covered:
+                covers += 1
+
+        total = len(convergent_total_results)
+        results.append({
+            'handicap': h,
+            'covers': covers,
+            'total': total,
+            'cover_pct': covers / total if total > 0 else 0,
+            'n_games': total
+        })
+
+    return pd.DataFrame(results)
+
+
+# =============================================================================
 # CLI for testing
 # =============================================================================
 

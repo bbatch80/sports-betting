@@ -259,20 +259,20 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
 
     logger.info(f"Collecting {sport_key.upper()} games for {target_date_only}...")
 
-    # Get odds (includes today's scheduled games with spreads and totals)
+    # Get odds — bulk endpoint supports spreads + totals (not team_totals)
     time.sleep(API_RATE_LIMIT_DELAY)
     odds_response = make_api_request(
         endpoint=f"sports/{api_sport_key}/odds",
         params={
             'regions': ','.join(DEFAULT_REGIONS),
-            'markets': 'spreads,totals,team_totals',  # Request spreads, totals, and team totals
+            'markets': 'spreads,totals',
             'oddsFormat': 'american',
             'dateFormat': 'iso'
         },
         api_key=api_key
     )
 
-    # Filter to target date
+    # Filter to target date and collect event IDs for team totals lookup
     now = datetime.utcnow()
     games_data = []
 
@@ -291,6 +291,7 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
                 odds = extract_odds_from_game(game)
 
                 games_data.append({
+                    'event_id': game.get('id'),
                     'sport': sport_key.upper(),
                     'game_date': target_date_only.isoformat(),
                     'commence_time': event_time.isoformat(),
@@ -300,14 +301,42 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
                     'spread_source': odds['spread_source'],
                     'total': odds['total'],
                     'total_source': odds['total_source'],
-                    'home_team_total': odds['home_team_total'],
-                    'away_team_total': odds['away_team_total'],
+                    'home_team_total': None,
+                    'away_team_total': None,
                     'created_at': now,
                     'updated_at': now
                 })
         except Exception as e:
             logger.warning(f"Error parsing game: {e}")
             continue
+
+    # Fetch team totals per event (requires per-event endpoint)
+    tt_found = 0
+    for game_data in games_data:
+        event_id = game_data.pop('event_id', None)
+        if not event_id:
+            continue
+        try:
+            time.sleep(API_RATE_LIMIT_DELAY)
+            tt_response = make_api_request(
+                endpoint=f"sports/{api_sport_key}/events/{event_id}/odds",
+                params={
+                    'regions': ','.join(DEFAULT_REGIONS),
+                    'markets': 'team_totals',
+                    'oddsFormat': 'american',
+                    'dateFormat': 'iso'
+                },
+                api_key=api_key
+            )
+            tt_odds = extract_odds_from_game(tt_response)
+            game_data['home_team_total'] = tt_odds['home_team_total']
+            game_data['away_team_total'] = tt_odds['away_team_total']
+            if tt_odds['home_team_total'] is not None:
+                tt_found += 1
+        except Exception as e:
+            logger.warning(f"Could not get team totals for event {event_id}: {e}")
+
+    logger.info(f"Got team totals for {tt_found}/{len(games_data)} games")
 
     logger.info(f"Found {len(games_data)} games for today")
 

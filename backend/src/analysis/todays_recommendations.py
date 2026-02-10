@@ -19,8 +19,13 @@ import os
 import pandas as pd
 import requests
 
-from .insights import InsightPattern, get_cached_streaks
-from .tier_matchups import TierMatchupPattern, get_tier
+from .insights import (
+    InsightPattern,
+    get_cached_streaks,
+    get_cached_ou_streaks,
+    get_cached_tt_streaks,
+)
+from .tier_matchups import get_tier
 from .network_ratings import get_cached_rankings
 
 
@@ -45,7 +50,7 @@ DEFAULT_REGIONS = ['us']
 class BetRecommendation:
     """A single betting recommendation for a game."""
     bet_on: str              # Team name to bet on
-    source: str              # 'streak' or 'tier_matchup'
+    source: str              # 'streak', 'ou_streak', or 'tt_streak'
     edge: float              # Expected edge vs baseline
     confidence: str          # 'high', 'medium', 'low'
     rationale: str           # Human-readable explanation
@@ -69,8 +74,18 @@ class GameRecommendation:
     away_tier: Optional[str]
     home_ats_rating: Optional[float]  # ATS rating 0-1
     away_ats_rating: Optional[float]  # ATS rating 0-1
-    home_streak: Optional[Tuple[int, str]]  # (length, type)
+    home_streak: Optional[Tuple[int, str]]  # (length, type) - ATS streak
     away_streak: Optional[Tuple[int, str]]
+    # Totals info
+    total: Optional[float] = None            # Game total line
+    total_source: Optional[str] = None       # Bookmaker name for total
+    home_team_total: Optional[float] = None  # Home team total line
+    away_team_total: Optional[float] = None  # Away team total line
+    # O/U and TT streaks
+    home_ou_streak: Optional[Tuple[int, str]] = None
+    away_ou_streak: Optional[Tuple[int, str]] = None
+    home_tt_streak: Optional[Tuple[int, str]] = None
+    away_tt_streak: Optional[Tuple[int, str]] = None
 
     def to_dict(self) -> dict:
         result = asdict(self)
@@ -238,7 +253,9 @@ def get_todays_games_from_db(conn: sqlite3.Connection, sport: str) -> List[Dict]
     today = datetime.now(est).date()
 
     query = text("""
-        SELECT sport, game_date, commence_time, home_team, away_team, spread, spread_source, updated_at
+        SELECT sport, game_date, commence_time, home_team, away_team,
+               spread, spread_source, updated_at,
+               total, total_source, home_team_total, away_team_total
         FROM todays_games
         WHERE sport = :sport AND game_date = :game_date
         ORDER BY commence_time ASC
@@ -256,7 +273,11 @@ def get_todays_games_from_db(conn: sqlite3.Connection, sport: str) -> List[Dict]
                 'commence_time': row[2].isoformat() if hasattr(row[2], 'isoformat') else str(row[2]),
                 'spread': row[5],
                 'spread_source': row[6],
-                'updated_at': row[7]
+                'updated_at': row[7],
+                'total': row[8],
+                'total_source': row[9],
+                'home_team_total': row[10],
+                'away_team_total': row[11],
             })
         return games
     except Exception as e:
@@ -410,63 +431,111 @@ def match_streak_patterns(
     return recommendations
 
 
-def match_tier_patterns(
-    home_team: str,
-    away_team: str,
-    home_tier_info: Tuple[str, float],
-    away_tier_info: Tuple[str, float],
-    patterns: List[TierMatchupPattern],
+
+def match_ou_streak_patterns(
+    team: str,
+    opponent: str,
+    ou_streak: Tuple[int, str],
+    patterns: List[InsightPattern],
     sport: str
 ) -> List[BetRecommendation]:
     """
-    Check if a game's tier matchup matches any profitable patterns.
+    Check if a team's O/U streak matches any profitable O/U patterns.
 
     Args:
-        home_team: Home team name
-        away_team: Away team name
-        home_tier_info: (tier, ats_rating) for home team
-        away_tier_info: (tier, ats_rating) for away team
-        patterns: List of detected tier matchup patterns
+        team: Team name (whose streak we're checking)
+        opponent: Opponent team name
+        ou_streak: (streak_length, streak_type) where type is 'OVER'|'UNDER'
+        patterns: List of detected O/U patterns (market_type='ou')
         sport: Sport key
 
     Returns:
-        List of BetRecommendation if patterns match
+        List of BetRecommendation for O/U bets
     """
     recommendations = []
-
-    home_tier, home_rating = home_tier_info
-    away_tier, away_rating = away_tier_info
-
-    # Determine higher/lower rated team
-    if home_rating > away_rating:
-        higher_team, higher_tier = home_team, home_tier
-        lower_team, lower_tier = away_team, away_tier
-    else:
-        higher_team, higher_tier = away_team, away_tier
-        lower_team, lower_tier = home_team, home_tier
+    streak_length, streak_type = ou_streak
 
     for pattern in patterns:
         if pattern.sport != sport:
             continue
-        if pattern.higher_tier != higher_tier:
+        if pattern.market_type != 'ou':
             continue
-        if pattern.lower_tier != lower_tier:
+        if pattern.streak_type != streak_type:
+            continue
+        if streak_length < pattern.streak_length:
             continue
 
-        # Determine which team to bet on
-        bet_team = higher_team if pattern.bet_on == 'HIGHER' else lower_team
-        bet_tier = higher_tier if pattern.bet_on == 'HIGHER' else lower_tier
+        # Determine OVER or UNDER recommendation
+        if pattern.pattern_type == 'streak_ride':
+            # Ride = bet same direction as streak
+            bet_direction = streak_type  # OVER or UNDER
+        else:
+            # Fade = bet opposite direction
+            bet_direction = 'UNDER' if streak_type == 'OVER' else 'OVER'
 
         rec = BetRecommendation(
-            bet_on=bet_team,
-            source='tier_matchup',
-            edge=pattern.edge,
+            bet_on=f"Game Total {bet_direction}",
+            source='ou_streak',
+            edge=abs(pattern.edge),
             confidence=pattern.confidence,
-            rationale=f"{higher_tier} vs {lower_tier} @ +{pattern.handicap} -> Bet {pattern.bet_on} ({pattern.edge:.1%} edge)",
+            rationale=f"{team} on {streak_length}-game O/U {streak_type.lower()} streak -> {bet_direction} ({abs(pattern.edge):.1%} edge)",
             handicap=pattern.handicap
         )
+
         recommendations.append(rec)
-        break  # Only one tier recommendation per game
+        break  # Only one O/U recommendation per team's streak
+
+    return recommendations
+
+
+def match_tt_streak_patterns(
+    team: str,
+    tt_streak: Tuple[int, str],
+    patterns: List[InsightPattern],
+    sport: str
+) -> List[BetRecommendation]:
+    """
+    Check if a team's TT streak matches any profitable team total patterns.
+
+    Args:
+        team: Team name (whose streak we're checking)
+        tt_streak: (streak_length, streak_type) where type is 'OVER'|'UNDER'
+        patterns: List of detected TT patterns (market_type='tt')
+        sport: Sport key
+
+    Returns:
+        List of BetRecommendation for team total bets
+    """
+    recommendations = []
+    streak_length, streak_type = tt_streak
+
+    for pattern in patterns:
+        if pattern.sport != sport:
+            continue
+        if pattern.market_type != 'tt':
+            continue
+        if pattern.streak_type != streak_type:
+            continue
+        if streak_length < pattern.streak_length:
+            continue
+
+        # Determine OVER or UNDER recommendation
+        if pattern.pattern_type == 'streak_ride':
+            bet_direction = streak_type
+        else:
+            bet_direction = 'UNDER' if streak_type == 'OVER' else 'OVER'
+
+        rec = BetRecommendation(
+            bet_on=f"{team} TT {bet_direction}",
+            source='tt_streak',
+            edge=abs(pattern.edge),
+            confidence=pattern.confidence,
+            rationale=f"{team} on {streak_length}-game TT {streak_type.lower()} streak -> TT {bet_direction} ({abs(pattern.edge):.1%} edge)",
+            handicap=pattern.handicap
+        )
+
+        recommendations.append(rec)
+        break  # Only one TT recommendation per team's streak
 
     return recommendations
 
@@ -479,23 +548,30 @@ def generate_recommendations(
     conn: sqlite3.Connection,
     sport: str,
     streak_patterns: List[InsightPattern],
-    tier_patterns: List[TierMatchupPattern],
+    ou_patterns: List[InsightPattern] = None,
+    tt_patterns: List[InsightPattern] = None,
 ) -> List[GameRecommendation]:
     """
     Generate betting recommendations for today's games.
 
-    Combines streak insights and tier matchup insights for each game.
+    Combines ATS streak, O/U streak, and TT streak insights.
     Games are fetched from the database (pre-collected by Lambda).
 
     Args:
         conn: Database connection
         sport: Sport to analyze ('NFL', 'NBA', 'NCAAM', or 'All')
-        streak_patterns: Detected streak patterns
-        tier_patterns: Detected tier matchup patterns
+        streak_patterns: Detected ATS streak patterns
+        ou_patterns: Detected O/U streak patterns (optional)
+        tt_patterns: Detected TT streak patterns (optional)
 
     Returns:
         List of GameRecommendation sorted by game time
     """
+    if ou_patterns is None:
+        ou_patterns = []
+    if tt_patterns is None:
+        tt_patterns = []
+
     # Handle "All" sports
     sports = ['NFL', 'NBA', 'NCAAM'] if sport == 'All' else [sport]
 
@@ -511,6 +587,22 @@ def generate_recommendations(
         tier_lookup = get_team_tier_lookup(conn, sp)
         streak_lookup = get_team_streak_lookup(conn, sp)
 
+        # Build O/U and TT streak lookups
+        ou_streak_lookup = {}
+        tt_streak_lookup = {}
+        if ou_patterns:
+            ou_streaks = get_cached_ou_streaks(conn, sp)
+            ou_streak_lookup = {
+                team: (info['streak_length'], info['streak_type'])
+                for team, info in ou_streaks.items()
+            }
+        if tt_patterns:
+            tt_streaks = get_cached_tt_streaks(conn, sp)
+            tt_streak_lookup = {
+                team: (info['streak_length'], info['streak_type'])
+                for team, info in tt_streaks.items()
+            }
+
         for game in games:
             home_team = game.get('home_team', '')
             away_team = game.get('away_team', '')
@@ -519,15 +611,27 @@ def generate_recommendations(
             spread = game.get('spread')
             spread_source = game.get('spread_source')
 
+            # Get totals info
+            total = game.get('total')
+            total_source = game.get('total_source')
+            home_team_total = game.get('home_team_total')
+            away_team_total = game.get('away_team_total')
+
             # Get team info
             home_tier_info = tier_lookup.get(home_team)
             away_tier_info = tier_lookup.get(away_team)
             home_streak = streak_lookup.get(home_team)
             away_streak = streak_lookup.get(away_team)
 
+            # Get O/U and TT streaks
+            home_ou_streak = ou_streak_lookup.get(home_team)
+            away_ou_streak = ou_streak_lookup.get(away_team)
+            home_tt_streak = tt_streak_lookup.get(home_team)
+            away_tt_streak = tt_streak_lookup.get(away_team)
+
             recs = []
 
-            # Check streak patterns for both teams
+            # Check ATS streak patterns for both teams
             if home_streak:
                 recs.extend(match_streak_patterns(
                     home_team, away_team, home_streak, streak_patterns, sp
@@ -537,12 +641,24 @@ def generate_recommendations(
                     away_team, home_team, away_streak, streak_patterns, sp
                 ))
 
-            # Check tier matchup patterns
-            if home_tier_info and away_tier_info:
-                recs.extend(match_tier_patterns(
-                    home_team, away_team,
-                    home_tier_info, away_tier_info,
-                    tier_patterns, sp
+            # Check O/U streak patterns for both teams
+            if home_ou_streak and ou_patterns:
+                recs.extend(match_ou_streak_patterns(
+                    home_team, away_team, home_ou_streak, ou_patterns, sp
+                ))
+            if away_ou_streak and ou_patterns:
+                recs.extend(match_ou_streak_patterns(
+                    away_team, home_team, away_ou_streak, ou_patterns, sp
+                ))
+
+            # Check TT streak patterns for both teams
+            if home_tt_streak and tt_patterns:
+                recs.extend(match_tt_streak_patterns(
+                    home_team, home_tt_streak, tt_patterns, sp
+                ))
+            if away_tt_streak and tt_patterns:
+                recs.extend(match_tt_streak_patterns(
+                    away_team, away_tt_streak, tt_patterns, sp
                 ))
 
             # Create game recommendation
@@ -559,7 +675,15 @@ def generate_recommendations(
                 home_ats_rating=home_tier_info[1] if home_tier_info else None,
                 away_ats_rating=away_tier_info[1] if away_tier_info else None,
                 home_streak=home_streak,
-                away_streak=away_streak
+                away_streak=away_streak,
+                total=total,
+                total_source=total_source,
+                home_team_total=home_team_total,
+                away_team_total=away_team_total,
+                home_ou_streak=home_ou_streak,
+                away_ou_streak=away_ou_streak,
+                home_tt_streak=home_tt_streak,
+                away_tt_streak=away_tt_streak,
             )
 
             all_recommendations.append(game_rec)
@@ -613,7 +737,7 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
     Read pre-computed recommendations from the database cache table.
 
     This is the fast path - reads from todays_recommendations table
-    that was populated by the generate_current_rankings Lambda at 6:20 AM.
+    that was populated by the daily-precompute Lambda at 6:20 AM.
 
     Falls back to live computation if cache is empty (slow but functional).
 
@@ -630,28 +754,32 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
     est = timezone(timedelta(hours=-5))
     today = datetime.now(est).date()
 
-    # Build query
-    if sport and sport != 'All':
-        query = text("""
+    # Build query - use column names for clarity
+    select_cols = """
             SELECT sport, game_date, home_team, away_team, game_time,
                    spread, spread_source, home_tier, away_tier,
                    home_ats_rating, away_ats_rating,
                    home_streak_length, home_streak_type,
                    away_streak_length, away_streak_type,
-                   recommendations_json
+                   recommendations_json,
+                   total, total_source, home_team_total, away_team_total,
+                   home_ou_streak_length, home_ou_streak_type,
+                   away_ou_streak_length, away_ou_streak_type,
+                   home_tt_streak_length, home_tt_streak_type,
+                   away_tt_streak_length, away_tt_streak_type
+    """
+
+    if sport and sport != 'All':
+        query = text(f"""
+            {select_cols}
             FROM todays_recommendations
             WHERE game_date = :game_date AND sport = :sport
             ORDER BY game_time
         """)
         params = {'game_date': today, 'sport': sport}
     else:
-        query = text("""
-            SELECT sport, game_date, home_team, away_team, game_time,
-                   spread, spread_source, home_tier, away_tier,
-                   home_ats_rating, away_ats_rating,
-                   home_streak_length, home_streak_type,
-                   away_streak_length, away_streak_type,
-                   recommendations_json
+        query = text(f"""
+            {select_cols}
             FROM todays_recommendations
             WHERE game_date = :game_date
             ORDER BY game_time
@@ -667,15 +795,30 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
     if not rows:
         # Fallback to live computation (expensive, but still works)
         # This happens if Lambda hasn't run yet or no games today
-        from .insights import get_cached_patterns
+        from .insights import get_cached_patterns, get_cached_ou_patterns, get_cached_tt_patterns
         patterns = get_cached_patterns(conn, min_sample=30, min_edge=0.05)
-        return generate_recommendations(conn, sport or 'All', patterns, [])
+        ou_pats = get_cached_ou_patterns(conn, min_sample=30, min_edge=0.05)
+        tt_pats = get_cached_tt_patterns(conn, min_sample=30, min_edge=0.05)
+        return generate_recommendations(conn, sport or 'All', patterns,
+                                        ou_patterns=ou_pats, tt_patterns=tt_pats)
 
     # Convert rows to GameRecommendation objects
+    # Column indices:
+    #  0=sport, 1=game_date, 2=home_team, 3=away_team, 4=game_time,
+    #  5=spread, 6=spread_source, 7=home_tier, 8=away_tier,
+    #  9=home_ats_rating, 10=away_ats_rating,
+    # 11=home_streak_length, 12=home_streak_type,
+    # 13=away_streak_length, 14=away_streak_type,
+    # 15=recommendations_json,
+    # 16=total, 17=total_source, 18=home_team_total, 19=away_team_total,
+    # 20=home_ou_streak_length, 21=home_ou_streak_type,
+    # 22=away_ou_streak_length, 23=away_ou_streak_type,
+    # 24=home_tt_streak_length, 25=home_tt_streak_type,
+    # 26=away_tt_streak_length, 27=away_tt_streak_type
     recommendations = []
     for row in rows:
         # Parse recommendations JSON
-        recs_json = row[15]  # recommendations_json column
+        recs_json = row[15]
         bet_recs = []
         if recs_json:
             try:
@@ -694,12 +837,30 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
 
         # Build streak tuples
         home_streak = None
-        if row[11] is not None and row[12]:  # home_streak_length, home_streak_type
+        if row[11] is not None and row[12]:
             home_streak = (row[11], row[12])
 
         away_streak = None
-        if row[13] is not None and row[14]:  # away_streak_length, away_streak_type
+        if row[13] is not None and row[14]:
             away_streak = (row[13], row[14])
+
+        # Build O/U streak tuples
+        home_ou_streak = None
+        if row[20] is not None and row[21]:
+            home_ou_streak = (row[20], row[21])
+
+        away_ou_streak = None
+        if row[22] is not None and row[23]:
+            away_ou_streak = (row[22], row[23])
+
+        # Build TT streak tuples
+        home_tt_streak = None
+        if row[24] is not None and row[25]:
+            home_tt_streak = (row[24], row[25])
+
+        away_tt_streak = None
+        if row[26] is not None and row[27]:
+            away_tt_streak = (row[26], row[27])
 
         game_rec = GameRecommendation(
             sport=row[0],
@@ -714,7 +875,15 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
             home_ats_rating=row[9],
             away_ats_rating=row[10],
             home_streak=home_streak,
-            away_streak=away_streak
+            away_streak=away_streak,
+            total=row[16],
+            total_source=row[17],
+            home_team_total=row[18],
+            away_team_total=row[19],
+            home_ou_streak=home_ou_streak,
+            away_ou_streak=away_ou_streak,
+            home_tt_streak=home_tt_streak,
+            away_tt_streak=away_tt_streak,
         )
         recommendations.append(game_rec)
 
@@ -736,7 +905,7 @@ def write_todays_recommendations(
     """
     Write today's recommendations to the database cache table.
 
-    Called by the generate_current_rankings Lambda function.
+    Called by the daily-precompute Lambda function.
 
     Args:
         engine: SQLAlchemy engine
@@ -759,22 +928,38 @@ def write_todays_recommendations(
     upsert_sql = text("""
         INSERT INTO todays_recommendations
         (sport, game_date, home_team, away_team, game_time,
-         spread, spread_source, home_tier, away_tier,
+         spread, spread_source, total, total_source,
+         home_team_total, away_team_total,
+         home_tier, away_tier,
          home_ats_rating, away_ats_rating,
          home_streak_length, home_streak_type,
          away_streak_length, away_streak_type,
+         home_ou_streak_length, home_ou_streak_type,
+         away_ou_streak_length, away_ou_streak_type,
+         home_tt_streak_length, home_tt_streak_type,
+         away_tt_streak_length, away_tt_streak_type,
          recommendations_json, computed_at)
         VALUES (:sport, :game_date, :home_team, :away_team, :game_time,
-                :spread, :spread_source, :home_tier, :away_tier,
+                :spread, :spread_source, :total, :total_source,
+                :home_team_total, :away_team_total,
+                :home_tier, :away_tier,
                 :home_ats_rating, :away_ats_rating,
                 :home_streak_length, :home_streak_type,
                 :away_streak_length, :away_streak_type,
+                :home_ou_streak_length, :home_ou_streak_type,
+                :away_ou_streak_length, :away_ou_streak_type,
+                :home_tt_streak_length, :home_tt_streak_type,
+                :away_tt_streak_length, :away_tt_streak_type,
                 :recommendations_json, :computed_at)
         ON CONFLICT (sport, game_date, home_team, away_team)
         DO UPDATE SET
             game_time = EXCLUDED.game_time,
             spread = EXCLUDED.spread,
             spread_source = EXCLUDED.spread_source,
+            total = EXCLUDED.total,
+            total_source = EXCLUDED.total_source,
+            home_team_total = EXCLUDED.home_team_total,
+            away_team_total = EXCLUDED.away_team_total,
             home_tier = EXCLUDED.home_tier,
             away_tier = EXCLUDED.away_tier,
             home_ats_rating = EXCLUDED.home_ats_rating,
@@ -783,6 +968,14 @@ def write_todays_recommendations(
             home_streak_type = EXCLUDED.home_streak_type,
             away_streak_length = EXCLUDED.away_streak_length,
             away_streak_type = EXCLUDED.away_streak_type,
+            home_ou_streak_length = EXCLUDED.home_ou_streak_length,
+            home_ou_streak_type = EXCLUDED.home_ou_streak_type,
+            away_ou_streak_length = EXCLUDED.away_ou_streak_length,
+            away_ou_streak_type = EXCLUDED.away_ou_streak_type,
+            home_tt_streak_length = EXCLUDED.home_tt_streak_length,
+            home_tt_streak_type = EXCLUDED.home_tt_streak_type,
+            away_tt_streak_length = EXCLUDED.away_tt_streak_length,
+            away_tt_streak_type = EXCLUDED.away_tt_streak_type,
             recommendations_json = EXCLUDED.recommendations_json,
             computed_at = EXCLUDED.computed_at
     """)
@@ -800,6 +993,10 @@ def write_todays_recommendations(
             'game_time': rec.game_time,
             'spread': rec.spread,
             'spread_source': rec.spread_source,
+            'total': rec.total,
+            'total_source': rec.total_source,
+            'home_team_total': rec.home_team_total,
+            'away_team_total': rec.away_team_total,
             'home_tier': rec.home_tier,
             'away_tier': rec.away_tier,
             'home_ats_rating': rec.home_ats_rating,
@@ -808,6 +1005,14 @@ def write_todays_recommendations(
             'home_streak_type': rec.home_streak[1] if rec.home_streak else None,
             'away_streak_length': rec.away_streak[0] if rec.away_streak else None,
             'away_streak_type': rec.away_streak[1] if rec.away_streak else None,
+            'home_ou_streak_length': rec.home_ou_streak[0] if rec.home_ou_streak else None,
+            'home_ou_streak_type': rec.home_ou_streak[1] if rec.home_ou_streak else None,
+            'away_ou_streak_length': rec.away_ou_streak[0] if rec.away_ou_streak else None,
+            'away_ou_streak_type': rec.away_ou_streak[1] if rec.away_ou_streak else None,
+            'home_tt_streak_length': rec.home_tt_streak[0] if rec.home_tt_streak else None,
+            'home_tt_streak_type': rec.home_tt_streak[1] if rec.home_tt_streak else None,
+            'away_tt_streak_length': rec.away_tt_streak[0] if rec.away_tt_streak else None,
+            'away_tt_streak_type': rec.away_tt_streak[1] if rec.away_tt_streak else None,
             'recommendations_json': recs_json,
             'computed_at': computed_at,
         })

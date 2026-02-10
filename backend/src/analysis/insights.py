@@ -11,7 +11,14 @@ import pandas as pd
 import sqlite3
 
 from ..database import get_games, get_all_teams
-from .metrics import streak_continuation_analysis, baseline_handicap_coverage
+from .metrics import (
+    streak_continuation_analysis,
+    baseline_handicap_coverage,
+    ou_streak_continuation_analysis,
+    baseline_ou_coverage,
+    tt_streak_continuation_analysis,
+    tt_baseline_coverage,
+)
 
 
 @dataclass
@@ -19,7 +26,7 @@ class InsightPattern:
     """A detected betting edge with statistical backing."""
     sport: str                    # 'NBA', 'NFL', 'NCAAM'
     pattern_type: str             # 'streak_fade', 'streak_ride'
-    streak_type: str              # 'WIN' or 'LOSS'
+    streak_type: str              # 'WIN'/'LOSS' (ATS) or 'OVER'/'UNDER' (O/U, TT)
     streak_length: int            # e.g., 3
     handicap: int                 # e.g., 0 (standard spread)
     cover_rate: float             # After streak, cover rate at handicap
@@ -27,6 +34,7 @@ class InsightPattern:
     edge: float                   # cover_rate - baseline_rate
     sample_size: int              # Number of observations
     confidence: str               # 'high', 'medium', 'low'
+    market_type: str = 'ats'      # 'ats', 'ou', or 'tt'
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -299,6 +307,77 @@ def get_cached_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dic
 
 
 # =============================================================================
+# Team Totals (Individual O/U) Streaks
+# =============================================================================
+
+def get_current_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+    """
+    Get each team's current team total O/U streak (live computation).
+
+    Uses home_team_total_result / away_team_total_result to track individual
+    team scoring vs their own O/U line.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+
+    Returns:
+        Dictionary mapping team name to streak info:
+        {team: {'streak_length': N, 'streak_type': 'OVER'|'UNDER'}}
+    """
+    all_games = get_games(conn, sport=sport)
+    if len(all_games) == 0:
+        return {}
+
+    for col in ['home_team_total_result', 'away_team_total_result']:
+        if col not in all_games.columns:
+            return {}
+
+    teams = set(all_games['home_team']) | set(all_games['away_team'])
+    streaks = {}
+
+    for team in teams:
+        team_games = all_games[
+            (all_games['home_team'] == team) | (all_games['away_team'] == team)
+        ].copy()
+
+        if len(team_games) == 0:
+            continue
+
+        # Sort most recent first
+        team_games = team_games.sort_values('game_date', ascending=False)
+
+        streak_length = 0
+        streak_type = None
+
+        for _, row in team_games.iterrows():
+            is_home = row['home_team'] == team
+            margin = row['home_team_total_result'] if is_home else row['away_team_total_result']
+
+            # Skip missing or pushes
+            if pd.isna(margin) or margin == 0:
+                continue
+
+            is_over = margin > 0
+
+            if streak_type is None:
+                streak_type = 'OVER' if is_over else 'UNDER'
+                streak_length = 1
+            elif (streak_type == 'OVER') == is_over:
+                streak_length += 1
+            else:
+                break
+
+        if streak_length > 0:
+            streaks[team] = {
+                'streak_length': streak_length,
+                'streak_type': streak_type or 'OVER'
+            }
+
+    return streaks
+
+
+# =============================================================================
 # ATS (Spread) Streaks
 # =============================================================================
 
@@ -435,7 +514,8 @@ def get_cached_patterns(
         SELECT sport, pattern_type, streak_type, streak_length, handicap,
                cover_rate, baseline_rate, edge, sample_size, confidence
         FROM detected_patterns
-        WHERE sample_size >= :min_sample AND ABS(edge) >= :min_edge
+        WHERE (market_type = 'ats' OR market_type IS NULL)
+          AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
         ORDER BY ABS(edge) DESC
     ''')
 
@@ -466,6 +546,303 @@ def get_cached_patterns(
         ))
 
     return patterns
+
+
+def detect_ou_patterns(
+    conn: sqlite3.Connection,
+    min_sample: int = 30,
+    min_edge: float = 0.05,
+    streak_range: tuple = (2, 7),
+    handicap_range: tuple = (0, 20)
+) -> List[InsightPattern]:
+    """
+    Scan all sports/streak combinations for significant O/U (game total) edges.
+
+    After X consecutive OVERs or UNDERs, does the next game go OVER at a higher
+    rate than the league baseline? Same structure as detect_patterns() but using
+    O/U analysis functions.
+
+    Args:
+        conn: Database connection
+        min_sample: Minimum observations required
+        min_edge: Minimum edge vs baseline (as decimal, e.g., 0.05 = 5%)
+        streak_range: (min, max) streak lengths to analyze
+        handicap_range: (min, max) handicap levels to analyze
+
+    Returns:
+        List of InsightPattern objects with market_type='ou', sorted by edge magnitude
+    """
+    patterns = []
+    games_cache = {}
+
+    for sport in ['NFL', 'NBA', 'NCAAM']:
+        # Get baseline O/U cover rates (OVER direction)
+        baseline = baseline_ou_coverage(conn, sport, handicap_range, direction='over')
+        if len(baseline) == 0:
+            continue
+
+        for streak_length in range(streak_range[0], streak_range[1] + 1):
+            for streak_type in ['OVER', 'UNDER']:
+                # Get O/U coverage after this streak (OVER direction)
+                data = ou_streak_continuation_analysis(
+                    conn, sport, streak_length, streak_type, handicap_range,
+                    direction='over', _all_games_cache=games_cache
+                )
+
+                if len(data) == 0:
+                    continue
+
+                for _, row in data.iterrows():
+                    handicap = row['handicap']
+
+                    baseline_row = baseline[baseline['handicap'] == handicap]
+                    if len(baseline_row) == 0:
+                        continue
+
+                    baseline_pct = baseline_row['baseline_cover_pct'].iloc[0]
+                    edge = row['cover_pct'] - baseline_pct
+
+                    if row['total'] >= min_sample and abs(edge) >= min_edge:
+                        patterns.append(InsightPattern(
+                            sport=sport,
+                            pattern_type='streak_ride' if edge > 0 else 'streak_fade',
+                            streak_type=streak_type,
+                            streak_length=streak_length,
+                            handicap=int(handicap),
+                            cover_rate=row['cover_pct'],
+                            baseline_rate=baseline_pct,
+                            edge=edge,
+                            sample_size=int(row['total']),
+                            confidence=get_confidence(int(row['total']), edge),
+                            market_type='ou',
+                        ))
+
+    return sorted(patterns, key=lambda p: abs(p.edge), reverse=True)
+
+
+def detect_tt_patterns(
+    conn: sqlite3.Connection,
+    min_sample: int = 30,
+    min_edge: float = 0.05,
+    streak_range: tuple = (2, 7),
+    handicap_range: tuple = (0, 10)
+) -> List[InsightPattern]:
+    """
+    Scan all sports/streak combinations for significant team total edges.
+
+    After X consecutive TT OVERs or UNDERs for a team, does the team's next
+    total go OVER at a higher rate than the league baseline?
+
+    Args:
+        conn: Database connection
+        min_sample: Minimum observations required
+        min_edge: Minimum edge vs baseline (as decimal, e.g., 0.05 = 5%)
+        streak_range: (min, max) streak lengths to analyze
+        handicap_range: (min, max) handicap levels to analyze
+
+    Returns:
+        List of InsightPattern objects with market_type='tt', sorted by edge magnitude
+    """
+    patterns = []
+
+    for sport in ['NFL', 'NBA', 'NCAAM']:
+        # Get baseline TT cover rates (OVER direction)
+        baseline = tt_baseline_coverage(conn, sport, handicap_range, direction='over')
+        if len(baseline) == 0:
+            continue
+
+        for streak_length in range(streak_range[0], streak_range[1] + 1):
+            for streak_type in ['OVER', 'UNDER']:
+                # Get TT coverage after this streak (ride direction)
+                data = tt_streak_continuation_analysis(
+                    conn, sport, streak_length, streak_type, handicap_range,
+                    direction='ride'
+                )
+
+                if len(data) == 0:
+                    continue
+
+                for _, row in data.iterrows():
+                    handicap = row['handicap']
+
+                    baseline_row = baseline[baseline['handicap'] == handicap]
+                    if len(baseline_row) == 0:
+                        continue
+
+                    baseline_pct = baseline_row['baseline_cover_pct'].iloc[0]
+                    edge = row['cover_pct'] - baseline_pct
+
+                    if row['total'] >= min_sample and abs(edge) >= min_edge:
+                        patterns.append(InsightPattern(
+                            sport=sport,
+                            pattern_type='streak_ride' if edge > 0 else 'streak_fade',
+                            streak_type=streak_type,
+                            streak_length=streak_length,
+                            handicap=int(handicap),
+                            cover_rate=row['cover_pct'],
+                            baseline_rate=baseline_pct,
+                            edge=edge,
+                            sample_size=int(row['total']),
+                            confidence=get_confidence(int(row['total']), edge),
+                            market_type='tt',
+                        ))
+
+    return sorted(patterns, key=lambda p: abs(p.edge), reverse=True)
+
+
+def get_cached_ou_patterns(
+    conn: sqlite3.Connection,
+    min_sample: int = 30,
+    min_edge: float = 0.05
+) -> List[InsightPattern]:
+    """
+    Get pre-computed O/U patterns from detected_patterns table.
+
+    Falls back to live computation if no O/U patterns are cached.
+
+    Args:
+        conn: Database connection
+        min_sample: Minimum sample size filter
+        min_edge: Minimum edge filter
+
+    Returns:
+        List of InsightPattern objects with market_type='ou'
+    """
+    from sqlalchemy import text
+
+    query = text('''
+        SELECT sport, pattern_type, streak_type, streak_length, handicap,
+               cover_rate, baseline_rate, edge, sample_size, confidence
+        FROM detected_patterns
+        WHERE market_type = 'ou'
+          AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
+        ORDER BY ABS(edge) DESC
+    ''')
+
+    try:
+        result = conn.execute(query, {'min_sample': min_sample, 'min_edge': min_edge})
+        rows = result.fetchall()
+    except Exception:
+        return detect_ou_patterns(conn, min_sample=min_sample, min_edge=min_edge)
+
+    if not rows:
+        return detect_ou_patterns(conn, min_sample=min_sample, min_edge=min_edge)
+
+    patterns = []
+    for row in rows:
+        patterns.append(InsightPattern(
+            sport=row[0],
+            pattern_type=row[1],
+            streak_type=row[2],
+            streak_length=row[3],
+            handicap=row[4],
+            cover_rate=row[5],
+            baseline_rate=row[6],
+            edge=row[7],
+            sample_size=row[8],
+            confidence=row[9],
+            market_type='ou',
+        ))
+
+    return patterns
+
+
+def get_cached_tt_patterns(
+    conn: sqlite3.Connection,
+    min_sample: int = 30,
+    min_edge: float = 0.05
+) -> List[InsightPattern]:
+    """
+    Get pre-computed TT patterns from detected_patterns table.
+
+    Falls back to live computation if no TT patterns are cached.
+
+    Args:
+        conn: Database connection
+        min_sample: Minimum sample size filter
+        min_edge: Minimum edge filter
+
+    Returns:
+        List of InsightPattern objects with market_type='tt'
+    """
+    from sqlalchemy import text
+
+    query = text('''
+        SELECT sport, pattern_type, streak_type, streak_length, handicap,
+               cover_rate, baseline_rate, edge, sample_size, confidence
+        FROM detected_patterns
+        WHERE market_type = 'tt'
+          AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
+        ORDER BY ABS(edge) DESC
+    ''')
+
+    try:
+        result = conn.execute(query, {'min_sample': min_sample, 'min_edge': min_edge})
+        rows = result.fetchall()
+    except Exception:
+        return detect_tt_patterns(conn, min_sample=min_sample, min_edge=min_edge)
+
+    if not rows:
+        return detect_tt_patterns(conn, min_sample=min_sample, min_edge=min_edge)
+
+    patterns = []
+    for row in rows:
+        patterns.append(InsightPattern(
+            sport=row[0],
+            pattern_type=row[1],
+            streak_type=row[2],
+            streak_length=row[3],
+            handicap=row[4],
+            cover_rate=row[5],
+            baseline_rate=row[6],
+            edge=row[7],
+            sample_size=row[8],
+            confidence=row[9],
+            market_type='tt',
+        ))
+
+    return patterns
+
+
+def get_cached_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+    """
+    Get pre-computed TT streaks from current_tt_streaks table.
+
+    Falls back to live computation if the table doesn't exist or is empty.
+
+    Args:
+        conn: Database connection
+        sport: Sport to analyze
+
+    Returns:
+        Dictionary mapping team name to streak info:
+        {team: {'streak_length': N, 'streak_type': 'OVER'|'UNDER'}}
+    """
+    from sqlalchemy import text
+
+    query = text('''
+        SELECT team, streak_length, streak_type
+        FROM current_tt_streaks
+        WHERE sport = :sport
+    ''')
+
+    try:
+        result = conn.execute(query, {'sport': sport})
+        rows = result.fetchall()
+    except Exception:
+        return get_current_tt_streaks(conn, sport)
+
+    if not rows:
+        return get_current_tt_streaks(conn, sport)
+
+    streaks = {}
+    for row in rows:
+        streaks[row[0]] = {
+            'streak_length': row[1] or 0,
+            'streak_type': row[2] or 'OVER',
+        }
+
+    return streaks
 
 
 def find_opportunities(
