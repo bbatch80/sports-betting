@@ -113,6 +113,7 @@ from src.analysis.tier_matchups import get_tier
 from src.analysis.todays_recommendations import (
     generate_recommendations,
     get_cached_recommendations,
+    get_closing_lines,
     get_combined_confidence,
     get_games_last_updated,
 )
@@ -1455,6 +1456,7 @@ def page_todays_picks():
     # Falls back to live computation if cache is empty
     with st.spinner("Loading today's picks..."):
         game_recommendations = get_cached_recommendations(conn, sport_to_use)
+        closing_lines = get_closing_lines(conn, sport_to_use)
 
     # Filter to only games with detected edges
     games_with_edges = [g for g in game_recommendations if g.recommendations]
@@ -1499,19 +1501,43 @@ def page_todays_picks():
                 with rating_col3:
                     st.caption(f"{game.sport} | {game.game_time}")
 
-                # Lines info (spread, total, team totals)
+                # Lines info (spread, total, team totals) with closing line movement
+                closing = closing_lines.get((game.sport, game.home_team, game.away_team), {})
                 lines_parts = []
                 if game.spread is not None:
                     spread_display = f"+{game.spread}" if game.spread > 0 else str(game.spread)
-                    lines_parts.append(f"Spread: {game.home_team} {spread_display} ({game.spread_source or 'Unknown'})")
+                    spread_text = f"Spread: {game.home_team} {spread_display}"
+                    cl_spread = closing.get('closing_spread')
+                    if cl_spread is not None:
+                        cl_display = f"+{cl_spread}" if cl_spread > 0 else str(cl_spread)
+                        arrow = " ↓" if cl_spread < game.spread else (" ↑" if cl_spread > game.spread else "")
+                        spread_text += f" → {cl_display}{arrow}"
+                    spread_text += f" ({game.spread_source or 'Unknown'})"
+                    lines_parts.append(spread_text)
                 if game.total is not None:
-                    lines_parts.append(f"Total: {game.total} ({game.total_source or 'Unknown'})")
+                    total_text = f"Total: {game.total}"
+                    cl_total = closing.get('closing_total')
+                    if cl_total is not None:
+                        arrow = " ↑" if cl_total > game.total else (" ↓" if cl_total < game.total else "")
+                        total_text += f" → {cl_total}{arrow}"
+                    total_text += f" ({game.total_source or 'Unknown'})"
+                    lines_parts.append(total_text)
                 if game.home_team_total is not None or game.away_team_total is not None:
                     tt_parts = []
+                    cl_away_tt = closing.get('closing_away_tt')
+                    cl_home_tt = closing.get('closing_home_tt')
                     if game.away_team_total is not None:
-                        tt_parts.append(f"{game.away_team} {game.away_team_total}")
+                        att = f"{game.away_team} {game.away_team_total}"
+                        if cl_away_tt is not None:
+                            arrow = " ↑" if cl_away_tt > game.away_team_total else (" ↓" if cl_away_tt < game.away_team_total else "")
+                            att += f" → {cl_away_tt}{arrow}"
+                        tt_parts.append(att)
                     if game.home_team_total is not None:
-                        tt_parts.append(f"{game.home_team} {game.home_team_total}")
+                        htt = f"{game.home_team} {game.home_team_total}"
+                        if cl_home_tt is not None:
+                            arrow = " ↑" if cl_home_tt > game.home_team_total else (" ↓" if cl_home_tt < game.home_team_total else "")
+                            htt += f" → {cl_home_tt}{arrow}"
+                        tt_parts.append(htt)
                     lines_parts.append(f"Team Totals: {' | '.join(tt_parts)}")
                 if lines_parts:
                     st.caption(" | ".join(lines_parts))

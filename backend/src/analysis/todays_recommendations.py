@@ -323,6 +323,52 @@ def get_games_last_updated(conn: sqlite3.Connection) -> Optional[datetime]:
         return None
 
 
+def get_closing_lines(conn, sport: str = None) -> Dict[Tuple[str, str, str], Dict]:
+    """
+    Fetch closing lines from todays_games for games where closing data has been captured.
+
+    Returns dict keyed by (sport, home_team, away_team) for O(1) lookup per game card.
+    No Streamlit caching — we want the freshest data on every page load.
+    """
+    from sqlalchemy import text
+
+    est = timezone(timedelta(hours=-5))
+    today = datetime.now(est).date()
+
+    sport_filter = "AND sport = :sport" if sport and sport != "All" else ""
+    query = text(f"""
+        SELECT sport, home_team, away_team,
+               closing_spread, closing_total, closing_home_tt, closing_away_tt
+        FROM todays_games
+        WHERE game_date = :game_date
+          AND closing_captured_at IS NOT NULL
+          {sport_filter}
+    """)
+
+    params = {'game_date': today}
+    if sport and sport != "All":
+        params['sport'] = sport
+
+    try:
+        result = conn.execute(query, params)
+        rows = result.fetchall()
+        return {
+            (row[0], row[1], row[2]): {
+                'closing_spread': row[3],
+                'closing_total': row[4],
+                'closing_home_tt': row[5],
+                'closing_away_tt': row[6],
+            }
+            for row in rows
+        }
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return {}
+
+
 # =============================================================================
 # Team State Functions
 # =============================================================================
