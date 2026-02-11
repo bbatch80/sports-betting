@@ -16,8 +16,10 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 import os
 
-import pandas as pd
-import requests
+try:
+    import pandas as pd
+except ImportError:
+    pd = None  # pandas not required in Lambda — stdlib datetime used instead
 
 from .insights import (
     InsightPattern,
@@ -160,6 +162,7 @@ def get_todays_games(sport: str, api_key: str) -> List[Dict]:
     }
 
     try:
+        import requests
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         all_games = response.json()
@@ -170,7 +173,7 @@ def get_todays_games(sport: str, api_key: str) -> List[Dict]:
             commence_time = game.get('commence_time')
             if commence_time:
                 try:
-                    event_time = pd.to_datetime(commence_time)
+                    event_time = datetime.fromisoformat(commence_time.replace('Z', '+00:00'))
                     if event_time.tzinfo is None:
                         event_time = event_time.replace(tzinfo=timezone.utc)
                     event_time_est = event_time.astimezone(est)
@@ -222,7 +225,7 @@ def format_game_time(commence_time: str) -> str:
     """Format commence time to readable EST string."""
     try:
         est = timezone(timedelta(hours=-5))
-        event_time = pd.to_datetime(commence_time)
+        event_time = datetime.fromisoformat(commence_time.replace('Z', '+00:00'))
         if event_time.tzinfo is None:
             event_time = event_time.replace(tzinfo=timezone.utc)
         event_time_est = event_time.astimezone(est)

@@ -6,85 +6,24 @@ Triggered by: EventBridge schedule (daily at 6:00 AM EST)
 """
 
 import json
-import boto3
-import os
 import time
-import requests
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List
 import logging
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List
+from sqlalchemy import text
+
+from shared import get_db_engine, get_api_key, make_api_request, SPORT_API_KEYS
 
 # Configure logging for CloudWatch
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS clients
-secrets_client = boto3.client('secretsmanager')
-s3_client = boto3.client('s3')
-
-# Configuration
-BUCKET_NAME = 'sports-betting-analytics-data'
-ODDS_API_SECRET = 'odds-api-key'
-DB_SECRET_NAME = 'sports-betting-db-credentials'
-
 # Sports configuration
 SPORTS = ['nfl', 'nba', 'ncaam']
-SPORT_API_KEYS = {
-    'nfl': 'americanfootball_nfl',
-    'nba': 'basketball_nba',
-    'ncaam': 'basketball_ncaab'
-}
 
 # API settings
 API_RATE_LIMIT_DELAY = 1.0
 DEFAULT_REGIONS = ['us']
-
-# Database engine singleton
-_db_engine = None
-
-
-def get_api_key() -> str:
-    """Get Odds API key from Secrets Manager."""
-    response = secrets_client.get_secret_value(SecretId=ODDS_API_SECRET)
-    return response['SecretString']
-
-
-def get_database_url() -> Optional[str]:
-    """Get DATABASE_URL from environment or Secrets Manager."""
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        return database_url
-
-    try:
-        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
-        secret = json.loads(response['SecretString'])
-        return secret.get('url')
-    except Exception as e:
-        logger.error(f"Could not retrieve DATABASE_URL: {e}")
-        return None
-
-
-def get_db_engine():
-    """Get or create database engine singleton."""
-    global _db_engine
-    if _db_engine is None:
-        database_url = get_database_url()
-        if database_url:
-            _db_engine = create_engine(database_url, poolclass=NullPool)
-            logger.info("✓ Database engine created")
-    return _db_engine
-
-
-def make_api_request(endpoint: str, params: Dict[str, Any], api_key: str) -> Any:
-    """Make request to Odds API."""
-    url = f"https://api.the-odds-api.com/v4/{endpoint}"
-    params['apiKey'] = api_key
-
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
 
 
 def get_closing_odds(api_key: str, sport_key: str, event_id: str,
@@ -96,7 +35,7 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
         tuple: (closing_spread, closing_total, home_team_total, away_team_total)
                Any value can be None if not available
     """
-    api_sport_key = SPORT_API_KEYS[sport_key]
+    api_sport_key = SPORT_API_KEYS[sport_key.upper()]
 
     try:
         # Parse commence time
@@ -241,7 +180,7 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
 
 def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[str, Any]:
     """Collect games for one sport and write to database."""
-    api_sport_key = SPORT_API_KEYS[sport_key]
+    api_sport_key = SPORT_API_KEYS[sport_key.upper()]
 
     # Convert to EST for date comparison
     est = timezone(timedelta(hours=-5))

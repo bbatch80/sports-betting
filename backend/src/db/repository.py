@@ -21,11 +21,15 @@ Why Repository Pattern?
     - Makes testing easier (can mock the repository)
     - All methods return DataFrames for consistency with existing code
 """
+from __future__ import annotations
 
 from datetime import date
 from typing import List, Optional, Tuple
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects import postgresql, sqlite
 

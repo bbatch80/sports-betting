@@ -19,13 +19,17 @@ MIGRATION NOTE:
         conn = get_connection()
         df = get_games(conn, sport="NFL")
 """
+from __future__ import annotations
 
 import warnings
 from datetime import date
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 
 # Import from the new db package
 from src.db import AnalyticsRepository, get_engine

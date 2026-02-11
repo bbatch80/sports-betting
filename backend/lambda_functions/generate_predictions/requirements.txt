@@ -1,9 +1,0 @@
-# Lambda Function Dependencies
-# Note: boto3 is provided by AWS Lambda runtime, don't include it
-
-pandas>=2.0.0
-openpyxl>=3.1.0
-requests>=2.31.0
-
-
-

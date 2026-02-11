@@ -9,11 +9,15 @@ The gap between them reveals market efficiency:
 - Positive gap (ATS > Win): Market undervalues this team
 - Negative gap (ATS < Win): Market overvalues this team
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional
 from datetime import date
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 import sqlite3
 
 from sqlalchemy import text

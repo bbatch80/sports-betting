@@ -6,174 +6,24 @@ Triggered by: EventBridge schedule (daily at 6:30 AM EST)
 """
 
 import json
-import boto3
-import os
 import time
-import requests
-from datetime import datetime, timedelta, timezone
-from typing import Dict, Any, Optional, List
 import logging
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Any, List
+from sqlalchemy import text
+
+from shared import get_db_engine, get_api_key, make_api_request, extract_odds_from_game, SPORT_API_KEYS
 
 # Configure logging for CloudWatch
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS clients
-secrets_client = boto3.client('secretsmanager')
-
-# Configuration
-ODDS_API_SECRET = 'odds-api-key'
-DB_SECRET_NAME = 'sports-betting-db-credentials'
-
 # Sports configuration
 SPORTS = ['nfl', 'nba', 'ncaam']
-SPORT_API_KEYS = {
-    'nfl': 'americanfootball_nfl',
-    'nba': 'basketball_nba',
-    'ncaam': 'basketball_ncaab'
-}
 
 # API settings
 API_RATE_LIMIT_DELAY = 1.0
 DEFAULT_REGIONS = ['us']
-
-# Database engine singleton
-_db_engine = None
-
-
-def get_api_key() -> str:
-    """Get Odds API key from Secrets Manager."""
-    response = secrets_client.get_secret_value(SecretId=ODDS_API_SECRET)
-    return response['SecretString']
-
-
-def get_database_url() -> Optional[str]:
-    """Get DATABASE_URL from environment or Secrets Manager."""
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        return database_url
-
-    try:
-        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
-        secret = json.loads(response['SecretString'])
-        return secret.get('url')
-    except Exception as e:
-        logger.error(f"Could not retrieve DATABASE_URL: {e}")
-        return None
-
-
-def get_db_engine():
-    """Get or create database engine singleton."""
-    global _db_engine
-    if _db_engine is None:
-        database_url = get_database_url()
-        if database_url:
-            _db_engine = create_engine(database_url, poolclass=NullPool)
-            logger.info("✓ Database engine created")
-    return _db_engine
-
-
-def make_api_request(endpoint: str, params: Dict[str, Any], api_key: str) -> Any:
-    """Make request to Odds API."""
-    url = f"https://api.the-odds-api.com/v4/{endpoint}"
-    params['apiKey'] = api_key
-
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def extract_odds_from_game(game: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extract current spread, total, and team totals from game data (DraftKings preferred).
-
-    Returns:
-        dict with keys: spread, spread_source, total, total_source, home_team_total, away_team_total
-    """
-    home_team = game.get('home_team', '')
-    away_team = game.get('away_team', '')
-    bookmakers = game.get('bookmakers', [])
-
-    result = {
-        'spread': None,
-        'spread_source': None,
-        'total': None,
-        'total_source': None,
-        'home_team_total': None,
-        'away_team_total': None
-    }
-
-    # Track fallback values for non-DraftKings bookmakers
-    fallback_spread = None
-    fallback_spread_source = None
-    fallback_total = None
-    fallback_total_source = None
-    fallback_home_tt = None
-    fallback_away_tt = None
-
-    for bookmaker in bookmakers:
-        is_dk = 'draftkings' in bookmaker.get('key', '').lower()
-        bookmaker_name = bookmaker.get('title', 'Unknown')
-
-        for market in bookmaker.get('markets', []):
-            # Extract spread
-            if market.get('key') == 'spreads':
-                for outcome in market.get('outcomes', []):
-                    if outcome.get('name') == home_team:
-                        spread = outcome.get('point')
-                        if is_dk:
-                            result['spread'] = spread
-                            result['spread_source'] = 'DraftKings'
-                        elif fallback_spread is None:
-                            fallback_spread = spread
-                            fallback_spread_source = bookmaker_name
-                        break
-
-            # Extract total (Over/Under have same point value)
-            elif market.get('key') == 'totals':
-                for outcome in market.get('outcomes', []):
-                    if outcome.get('point') is not None:
-                        total = outcome.get('point')
-                        if is_dk:
-                            result['total'] = total
-                            result['total_source'] = 'DraftKings'
-                        elif fallback_total is None:
-                            fallback_total = total
-                            fallback_total_source = bookmaker_name
-                        break
-
-            # Extract team totals — match by exact description against API names
-            elif market.get('key') == 'team_totals':
-                for outcome in market.get('outcomes', []):
-                    if outcome.get('name', '').lower() != 'over' or outcome.get('point') is None:
-                        continue
-                    desc = outcome.get('description', '')
-                    if desc == home_team:
-                        if is_dk:
-                            result['home_team_total'] = outcome['point']
-                        elif fallback_home_tt is None:
-                            fallback_home_tt = outcome['point']
-                    elif desc == away_team:
-                        if is_dk:
-                            result['away_team_total'] = outcome['point']
-                        elif fallback_away_tt is None:
-                            fallback_away_tt = outcome['point']
-
-    # Use fallback values if DraftKings not found
-    if result['spread'] is None and fallback_spread is not None:
-        result['spread'] = fallback_spread
-        result['spread_source'] = fallback_spread_source
-    if result['total'] is None and fallback_total is not None:
-        result['total'] = fallback_total
-        result['total_source'] = fallback_total_source
-    if result['home_team_total'] is None and fallback_home_tt is not None:
-        result['home_team_total'] = fallback_home_tt
-    if result['away_team_total'] is None and fallback_away_tt is not None:
-        result['away_team_total'] = fallback_away_tt
-
-    return result
 
 
 def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
@@ -210,7 +60,7 @@ def write_games_to_database(games: List[Dict[str, Any]], sport_key: str) -> int:
     try:
         with engine.begin() as conn:
             result = conn.execute(upsert_sql, games)
-            logger.info(f"✓ Database: upserted {result.rowcount} games for {sport_key.upper()}")
+            logger.info(f"Database: upserted {result.rowcount} games for {sport_key.upper()}")
             return result.rowcount
     except Exception as e:
         logger.error(f"Database write error: {e}")
@@ -232,7 +82,7 @@ def cleanup_old_games(days_to_keep: int = 7) -> int:
         with engine.begin() as conn:
             result = conn.execute(delete_sql, {'cutoff_date': cutoff_date})
             if result.rowcount > 0:
-                logger.info(f"✓ Cleaned up {result.rowcount} old games")
+                logger.info(f"Cleaned up {result.rowcount} old games")
             return result.rowcount
     except Exception as e:
         logger.error(f"Cleanup error: {e}")
@@ -241,7 +91,7 @@ def cleanup_old_games(days_to_keep: int = 7) -> int:
 
 def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[str, Any]:
     """Collect today's games for one sport."""
-    api_sport_key = SPORT_API_KEYS[sport_key]
+    api_sport_key = SPORT_API_KEYS[sport_key.upper()]
 
     # Convert to EST for date comparison
     est = timezone(timedelta(hours=-5))
@@ -277,8 +127,6 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
             event_date_est = event_time.astimezone(est).date()
 
             if event_date_est == target_date_only:
-                home_team = game.get('home_team', '')
-                away_team = game.get('away_team', '')
                 odds = extract_odds_from_game(game)
 
                 games_data.append({
@@ -286,8 +134,8 @@ def collect_sport(api_key: str, sport_key: str, target_date: datetime) -> Dict[s
                     'sport': sport_key.upper(),
                     'game_date': target_date_only.isoformat(),
                     'commence_time': event_time.isoformat(),
-                    'home_team': home_team,
-                    'away_team': away_team,
+                    'home_team': game.get('home_team', ''),
+                    'away_team': game.get('away_team', ''),
                     'spread': odds['spread'],
                     'spread_source': odds['spread_source'],
                     'total': odds['total'],
@@ -352,7 +200,7 @@ def lambda_handler(event, context):
 
     try:
         api_key = get_api_key()
-        logger.info("✓ Retrieved API key")
+        logger.info("Retrieved API key")
 
         # Calculate today (EST)
         est = timezone(timedelta(hours=-5))
@@ -366,9 +214,9 @@ def lambda_handler(event, context):
             try:
                 result = collect_sport(api_key, sport_key, today)
                 results.append(result)
-                logger.info(f"✓ {sport_key.upper()}: {result['games_found']} games, {result['db_rows']} written to DB")
+                logger.info(f"{sport_key.upper()}: {result['games_found']} games, {result['db_rows']} written to DB")
             except Exception as e:
-                logger.error(f"✗ Error processing {sport_key}: {e}")
+                logger.error(f"Error processing {sport_key}: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
 

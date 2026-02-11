@@ -36,22 +36,6 @@ LAMBDA_FUNCTIONS = {
         'runtime': 'python3.12',
         'schedule': 'cron(30 11 * * ? *)'  # 6:30 AM EST (11:30 UTC)
     },
-    'generate-predictions': {
-        'description': 'Generates betting opportunity predictions for today\'s games',
-        'timeout': 600,  # 10 minutes
-        'memory': 1024,  # MB (more for pandas operations)
-        'handler': 'lambda_function.lambda_handler',
-        'runtime': 'python3.12',
-        'schedule': 'cron(45 11 * * ? *)'  # 6:45 AM EST (11:45 UTC) - after collect-todays-games
-    },
-    'evaluate-strategy-results': {
-        'description': 'Evaluates yesterday\'s strategy predictions against actual results',
-        'timeout': 300,  # 5 minutes
-        'memory': 512,   # MB
-        'handler': 'lambda_function.lambda_handler',
-        'runtime': 'python3.12',
-        'schedule': 'cron(0 8 * * ? *)'  # 3:00 AM EST (8:00 UTC) - after all games complete
-    },
     'generate-historical-ratings': {
         'description': 'Generates daily team rating snapshots for backtesting',
         'timeout': 600,  # 10 minutes (rating computation can be intensive)
@@ -66,8 +50,41 @@ LAMBDA_FUNCTIONS = {
         'memory': 1024,  # MB (for iterative rating algorithm)
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
-        'schedule': 'cron(20 11 * * ? *)'  # 6:20 AM EST (11:20 UTC) - after generate-historical-ratings
-    }
+        'schedule': 'cron(20 11 * * ? *)',  # 6:20 AM EST (11:20 UTC) - after generate-historical-ratings
+        'include_src': True  # Bundle src/ package for recommendation generation
+    },
+    'schedule-closing-captures': {
+        'description': 'Creates per-game EventBridge schedules to capture closing lines',
+        'timeout': 60,
+        'memory': 256,
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': 'cron(0 12 * * ? *)'  # 7:00 AM EST (12:00 UTC) - after collect-todays-games
+    },
+    'capture-closing-lines': {
+        'description': 'Captures closing odds 30min before game tipoff',
+        'timeout': 60,
+        'memory': 256,
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': None  # Triggered by EventBridge Scheduler, not cron
+    },
+    'predictions-api': {
+        'description': 'Serves today\'s games with team data for mobile app',
+        'timeout': 30,
+        'memory': 256,
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': None  # Triggered by API Gateway
+    },
+    'results-api': {
+        'description': 'Serves game results from PostgreSQL for mobile app',
+        'timeout': 30,
+        'memory': 256,
+        'handler': 'lambda_function.lambda_handler',
+        'runtime': 'python3.12',
+        'schedule': None  # Triggered by API Gateway
+    },
 }
 
 
@@ -143,24 +160,29 @@ def install_dependencies(function_dir, requirements_file):
     return True
 
 
-def create_deployment_package(function_dir, function_name):
+def create_deployment_package(function_dir, function_name, include_src=False):
     """Create a zip file for Lambda deployment"""
     print(f"  Creating deployment package...")
-    
+
     package_dir = os.path.join(function_dir, 'package')
     zip_path = os.path.join(function_dir, f'{function_name}.zip')
-    
+
     # Remove old zip if exists
     if os.path.exists(zip_path):
         os.remove(zip_path)
-    
+
     # Create zip file
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Add Lambda function code FIRST (so it's at the root of the zip)
         lambda_file = os.path.join(function_dir, 'lambda_function.py')
         if os.path.exists(lambda_file):
             zipf.write(lambda_file, 'lambda_function.py')
-        
+
+        # Bundle shared.py into every Lambda zip
+        shared_file = os.path.join(function_dir, '..', 'shared.py')
+        if os.path.exists(shared_file):
+            zipf.write(shared_file, 'shared.py')
+
         # Add all files from package directory (dependencies)
         if os.path.exists(package_dir):
             for root, dirs, files in os.walk(package_dir):
@@ -173,10 +195,25 @@ def create_deployment_package(function_dir, function_name):
                     # Keep the directory structure from package_dir
                     arcname = os.path.relpath(file_path, package_dir)
                     zipf.write(file_path, arcname)
-    
+
+        # Optionally bundle the src/ package (needed for recommendation generation)
+        if include_src:
+            base_dir = Path(function_dir).parent.parent
+            src_dir = base_dir / 'src'
+            if src_dir.exists():
+                for root, dirs, files in os.walk(src_dir):
+                    dirs[:] = [d for d in dirs if d != '__pycache__']
+                    for file in files:
+                        if file.endswith('.pyc') or file.endswith('.pyo'):
+                            continue
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, base_dir)
+                        zipf.write(file_path, arcname)
+                print(f"  ✓ Bundled src/ package")
+
     file_size = os.path.getsize(zip_path) / (1024 * 1024)  # MB
     print(f"  ✓ Created {zip_path} ({file_size:.2f} MB)")
-    
+
     return zip_path
 
 
@@ -435,7 +472,7 @@ def main():
         
         # Step 2: Create deployment package
         print(f"\nStep 2: Creating deployment package...")
-        zip_path = create_deployment_package(str(function_dir), function_name)
+        zip_path = create_deployment_package(str(function_dir), function_name, include_src=config.get('include_src', False))
         if not zip_path or not os.path.exists(zip_path):
             print(f"✗ Failed to create deployment package")
             results.append((function_name, False))
@@ -457,12 +494,15 @@ def main():
             results.append((function_name, False))
             continue
         
-        # Step 5: Set up EventBridge schedule
-        print(f"\nStep 4: Setting up EventBridge schedule...")
-        if not create_eventbridge_rule(events_client, function_name, config['schedule'], lambda_arn):
-            print(f"✗ Failed to set up EventBridge")
-            results.append((function_name, False))
-            continue
+        # Step 5: Set up EventBridge schedule (skip if no schedule defined)
+        if config.get('schedule'):
+            print(f"\nStep 4: Setting up EventBridge schedule...")
+            if not create_eventbridge_rule(events_client, function_name, config['schedule'], lambda_arn):
+                print(f"✗ Failed to set up EventBridge")
+                results.append((function_name, False))
+                continue
+        else:
+            print(f"\nStep 4: No cron schedule (triggered externally), skipping EventBridge setup")
         
         results.append((function_name, True))
         print(f"\n✓ {function_name} deployed successfully!")

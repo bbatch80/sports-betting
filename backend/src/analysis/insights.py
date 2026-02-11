@@ -4,10 +4,14 @@ Dynamic insight engine for detecting betting patterns and opportunities.
 This module scans historical data for statistically significant edges
 and matches current team states to identify actionable betting opportunities.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 import sqlite3
 
 from ..database import get_games, get_all_teams

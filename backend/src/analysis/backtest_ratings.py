@@ -6,11 +6,15 @@ pre-game rating differentials (market gap, ATS rank, win rank).
 
 Key insight: 52.4% win rate is breakeven at -110 odds.
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Dict, List, Optional, Tuple
 from datetime import date
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
 import sqlite3
 
 from sqlalchemy import text

@@ -4,55 +4,19 @@ Serves game results from PostgreSQL via API Gateway for mobile app consumption
 """
 
 import json
-import boto3
-import os
 import logging
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from sqlalchemy import create_engine, text
-from sqlalchemy.pool import NullPool
+from sqlalchemy import text
+
+from shared import get_db_engine
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# AWS clients
-secrets_client = boto3.client('secretsmanager')
-
 # Configuration
 ALLOWED_SPORTS = ['nfl', 'nba', 'ncaam']
-DB_SECRET_NAME = 'sports-betting-db-credentials'
-
-# Database engine singleton
-_db_engine = None
-
-
-def get_database_url() -> Optional[str]:
-    """
-    Get DATABASE_URL from environment variable or Secrets Manager.
-    """
-    database_url = os.environ.get('DATABASE_URL')
-    if database_url:
-        return database_url
-
-    try:
-        response = secrets_client.get_secret_value(SecretId=DB_SECRET_NAME)
-        secret = json.loads(response['SecretString'])
-        return secret.get('url')
-    except Exception as e:
-        logger.error(f"Could not retrieve DATABASE_URL: {e}")
-        return None
-
-
-def get_db_engine():
-    """Get or create database engine singleton."""
-    global _db_engine
-    if _db_engine is None:
-        database_url = get_database_url()
-        if database_url:
-            _db_engine = create_engine(database_url, poolclass=NullPool)
-            logger.info("Database engine created")
-    return _db_engine
 
 
 def read_results_from_database(sport_key: str, start_date: Optional[str] = None,

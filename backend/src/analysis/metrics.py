@@ -10,9 +10,16 @@ All functions operate on DataFrames with standard columns:
 For league-wide (macro) analysis, use spread_result directly.
 For team-specific (micro) analysis, use team_covered column.
 """
+from __future__ import annotations
 
-import pandas as pd
-import numpy as np
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import numpy as np
+except ImportError:
+    np = None
 from typing import Tuple, Optional, List
 
 

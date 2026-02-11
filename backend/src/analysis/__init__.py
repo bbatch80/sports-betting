@@ -16,13 +16,6 @@ from .metrics import (
     ou_streak_summary_all_lengths,
 )
 
-from .aggregations import (
-    macro_ou_summary,
-    macro_ou_time_series,
-    macro_ou_by_total_bucket,
-    micro_ou_all_teams,
-)
-
 from .insights import (
     detect_ou_streak,
     get_current_ou_streaks,
@@ -41,11 +34,6 @@ __all__ = [
     'ou_record',
     'team_ou_cover_rate',
     'team_ou_record',
-    # O/U aggregations
-    'macro_ou_summary',
-    'macro_ou_time_series',
-    'macro_ou_by_total_bucket',
-    'micro_ou_all_teams',
     # O/U insights
     'detect_ou_streak',
     'get_current_ou_streaks',

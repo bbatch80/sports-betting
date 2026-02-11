@@ -15,11 +15,18 @@ Tier Definitions (based on ATS Rating):
 - LOW: 0.30 - 0.45
 - BOTTOM: < 0.30
 """
+from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
-import pandas as pd
-import numpy as np
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+try:
+    import numpy as np
+except ImportError:
+    np = None
 import sqlite3
 
 from ..database import get_games
