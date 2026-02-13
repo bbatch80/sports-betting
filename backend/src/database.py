@@ -35,8 +35,6 @@ except ImportError:
 from src.db import AnalyticsRepository, get_engine
 from src.db.models import create_tables
 
-# Default database path (for backward compatibility)
-DEFAULT_DB_PATH = Path(__file__).parent / "data" / "analytics.db"
 
 # Module-level repository singleton
 _repository: Optional[AnalyticsRepository] = None

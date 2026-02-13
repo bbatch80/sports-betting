@@ -1,8 +1,5 @@
 """
-Database package for sports betting analytics.
-
-This package provides a database abstraction layer that supports both
-SQLite (for local development) and PostgreSQL (for production on AWS RDS).
+Database package for sports betting analytics (PostgreSQL).
 
 Usage:
     from src.database import AnalyticsRepository
@@ -10,9 +7,7 @@ Usage:
     repo = AnalyticsRepository()
     games_df = repo.get_games(sport="NFL")
 
-The backend is automatically selected based on the DATABASE_URL environment variable:
-- If DATABASE_URL is set and starts with "postgresql": uses PostgreSQL
-- Otherwise: uses SQLite at backend/data/analytics.db
+Requires DATABASE_URL environment variable (auto-loaded from backend/.env).
 
 For backward compatibility, the original database.py facade module still works:
     from src.database import get_games, insert_games

@@ -334,6 +334,19 @@ def lambda_handler(event, context):
                 import traceback
                 logger.error(traceback.format_exc())
 
+        # Resolve any pending prediction outcomes now that results are in
+        try:
+            import sys
+            import os
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+            from src.analysis.prediction_tracking import resolve_prediction_outcomes
+            resolve_engine = get_db_engine()
+            if resolve_engine:
+                resolved = resolve_prediction_outcomes(resolve_engine, yesterday.date())
+                logger.info(f"Resolved {resolved} prediction outcomes")
+        except Exception as e:
+            logger.warning(f"Error resolving predictions (non-fatal): {e}")
+
         return {
             'statusCode': 200,
             'body': json.dumps({

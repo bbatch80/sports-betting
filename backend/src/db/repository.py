@@ -31,9 +31,9 @@ try:
 except ImportError:
     pd = None
 from sqlalchemy import delete, func, select, text
-from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.dialects import postgresql
 
-from src.config import DatabaseBackend, DatabaseConfig
+from src.config import DatabaseConfig
 from src.db.engine import get_engine
 from src.db.models import create_tables, games, historical_ratings, todays_games
 
@@ -78,24 +78,17 @@ class AnalyticsRepository:
             return False
 
     def _upsert(self, table, records: list, constraint: str, index_elements: list, update_cols: list) -> int:
-        """Execute upsert for a list of records. Handles SQLite vs PostgreSQL differences."""
+        """Execute upsert for a list of records using PostgreSQL ON CONFLICT."""
         if not records:
             return 0
         affected = 0
         with self.engine.begin() as conn:
             for record in records:
-                if self.config.is_postgresql:
-                    stmt = postgresql.insert(table).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        constraint=constraint,
-                        set_={col: getattr(stmt.excluded, col) for col in update_cols},
-                    )
-                else:
-                    stmt = sqlite.insert(table).values(**record)
-                    stmt = stmt.on_conflict_do_update(
-                        index_elements=index_elements,
-                        set_={col: getattr(stmt.excluded, col) for col in update_cols},
-                    )
+                stmt = postgresql.insert(table).values(**record)
+                stmt = stmt.on_conflict_do_update(
+                    constraint=constraint,
+                    set_={col: getattr(stmt.excluded, col) for col in update_cols},
+                )
                 result = conn.execute(stmt)
                 affected += result.rowcount
         return affected

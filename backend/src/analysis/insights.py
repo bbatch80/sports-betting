@@ -39,6 +39,7 @@ class InsightPattern:
     sample_size: int              # Number of observations
     confidence: str               # 'high', 'medium', 'low'
     market_type: str = 'ats'      # 'ats', 'ou', or 'tt'
+    coverage_profile: Optional[Dict] = None  # {handicap_int: {cover_rate, baseline_rate, edge, sample_size}}
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -512,11 +513,13 @@ def get_cached_patterns(
     Returns:
         List of InsightPattern objects, sorted by edge magnitude
     """
+    import json as _json
     from sqlalchemy import text
 
     query = text('''
         SELECT sport, pattern_type, streak_type, streak_length, handicap,
-               cover_rate, baseline_rate, edge, sample_size, confidence
+               cover_rate, baseline_rate, edge, sample_size, confidence,
+               coverage_profile_json
         FROM detected_patterns
         WHERE (market_type = 'ats' OR market_type IS NULL)
           AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
@@ -527,15 +530,18 @@ def get_cached_patterns(
         result = conn.execute(query, {'min_sample': min_sample, 'min_edge': min_edge})
         rows = result.fetchall()
     except Exception:
-        # Table might not exist yet - fall back to live computation
         return detect_patterns(conn, min_sample=min_sample, min_edge=min_edge)
 
     if not rows:
-        # Table is empty - fall back to live computation
         return detect_patterns(conn, min_sample=min_sample, min_edge=min_edge)
 
     patterns = []
     for row in rows:
+        raw_profile = row[10]
+        profile = None
+        if raw_profile:
+            profile = {int(k): v for k, v in _json.loads(raw_profile).items()}
+
         patterns.append(InsightPattern(
             sport=row[0],
             pattern_type=row[1],
@@ -547,6 +553,7 @@ def get_cached_patterns(
             edge=row[7],
             sample_size=row[8],
             confidence=row[9],
+            coverage_profile=profile,
         ))
 
     return patterns
@@ -712,11 +719,13 @@ def get_cached_ou_patterns(
     Returns:
         List of InsightPattern objects with market_type='ou'
     """
+    import json as _json
     from sqlalchemy import text
 
     query = text('''
         SELECT sport, pattern_type, streak_type, streak_length, handicap,
-               cover_rate, baseline_rate, edge, sample_size, confidence
+               cover_rate, baseline_rate, edge, sample_size, confidence,
+               coverage_profile_json
         FROM detected_patterns
         WHERE market_type = 'ou'
           AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
@@ -734,6 +743,11 @@ def get_cached_ou_patterns(
 
     patterns = []
     for row in rows:
+        raw_profile = row[10]
+        profile = None
+        if raw_profile:
+            profile = {int(k): v for k, v in _json.loads(raw_profile).items()}
+
         patterns.append(InsightPattern(
             sport=row[0],
             pattern_type=row[1],
@@ -746,6 +760,7 @@ def get_cached_ou_patterns(
             sample_size=row[8],
             confidence=row[9],
             market_type='ou',
+            coverage_profile=profile,
         ))
 
     return patterns
@@ -769,11 +784,13 @@ def get_cached_tt_patterns(
     Returns:
         List of InsightPattern objects with market_type='tt'
     """
+    import json as _json
     from sqlalchemy import text
 
     query = text('''
         SELECT sport, pattern_type, streak_type, streak_length, handicap,
-               cover_rate, baseline_rate, edge, sample_size, confidence
+               cover_rate, baseline_rate, edge, sample_size, confidence,
+               coverage_profile_json
         FROM detected_patterns
         WHERE market_type = 'tt'
           AND sample_size >= :min_sample AND ABS(edge) >= :min_edge
@@ -791,6 +808,11 @@ def get_cached_tt_patterns(
 
     patterns = []
     for row in rows:
+        raw_profile = row[10]
+        profile = None
+        if raw_profile:
+            profile = {int(k): v for k, v in _json.loads(raw_profile).items()}
+
         patterns.append(InsightPattern(
             sport=row[0],
             pattern_type=row[1],
@@ -803,6 +825,7 @@ def get_cached_tt_patterns(
             sample_size=row[8],
             confidence=row[9],
             market_type='tt',
+            coverage_profile=profile,
         ))
 
     return patterns

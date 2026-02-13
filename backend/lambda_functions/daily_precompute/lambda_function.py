@@ -586,6 +586,19 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                 games, teams, streak_length, streak_type, cfg['handicap_range']
             )
 
+            # Build full coverage profile for this (streak_type, streak_length)
+            coverage_profile = {}
+            for h in range(cfg['handicap_range'][0], cfg['handicap_range'][1] + 1):
+                covers, total = continuation[h]
+                if total >= 5:
+                    coverage_profile[h] = {
+                        'cover_rate': round(covers / total, 4),
+                        'baseline_rate': round(baseline[h], 4),
+                        'edge': round((covers / total) - baseline[h], 4),
+                        'sample_size': total,
+                    }
+            profile_json = json.dumps(coverage_profile) if coverage_profile else None
+
             for handicap in range(cfg['handicap_range'][0], cfg['handicap_range'][1] + 1):
                 covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
@@ -611,6 +624,7 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),
+                    'coverage_profile_json': profile_json,
                 })
 
     return patterns
@@ -725,6 +739,19 @@ def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                 games, teams, streak_length, streak_type, ou_handicap_range
             )
 
+            # Build full coverage profile for this (streak_type, streak_length)
+            coverage_profile = {}
+            for h in range(ou_handicap_range[0], ou_handicap_range[1] + 1):
+                covers, total = continuation[h]
+                if total >= 5:
+                    coverage_profile[h] = {
+                        'cover_rate': round(covers / total, 4),
+                        'baseline_rate': round(baseline.get(h, 0.5), 4),
+                        'edge': round((covers / total) - baseline.get(h, 0.5), 4),
+                        'sample_size': total,
+                    }
+            profile_json = json.dumps(coverage_profile) if coverage_profile else None
+
             for handicap in range(ou_handicap_range[0], ou_handicap_range[1] + 1):
                 covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
@@ -751,6 +778,7 @@ def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),
+                    'coverage_profile_json': profile_json,
                 })
 
     return patterns
@@ -871,6 +899,19 @@ def detect_tt_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                 games, teams, streak_length, streak_type, tt_handicap_range
             )
 
+            # Build full coverage profile for this (streak_type, streak_length)
+            coverage_profile = {}
+            for h in range(tt_handicap_range[0], tt_handicap_range[1] + 1):
+                covers, total = continuation[h]
+                if total >= 5:
+                    coverage_profile[h] = {
+                        'cover_rate': round(covers / total, 4),
+                        'baseline_rate': round(baseline.get(h, 0.5), 4),
+                        'edge': round((covers / total) - baseline.get(h, 0.5), 4),
+                        'sample_size': total,
+                    }
+            profile_json = json.dumps(coverage_profile) if coverage_profile else None
+
             for handicap in range(tt_handicap_range[0], tt_handicap_range[1] + 1):
                 covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
@@ -897,6 +938,7 @@ def detect_tt_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),
+                    'coverage_profile_json': profile_json,
                 })
 
     return patterns
@@ -914,9 +956,9 @@ def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime)
     upsert_sql = text("""
         INSERT INTO detected_patterns
         (sport, market_type, pattern_type, streak_type, streak_length, handicap,
-         cover_rate, baseline_rate, edge, sample_size, confidence, computed_at)
+         cover_rate, baseline_rate, edge, sample_size, confidence, coverage_profile_json, computed_at)
         VALUES (:sport, :market_type, :pattern_type, :streak_type, :streak_length, :handicap,
-                :cover_rate, :baseline_rate, :edge, :sample_size, :confidence, :computed_at)
+                :cover_rate, :baseline_rate, :edge, :sample_size, :confidence, :coverage_profile_json, :computed_at)
         ON CONFLICT (sport, market_type, pattern_type, streak_type, streak_length, handicap)
         DO UPDATE SET
             cover_rate = EXCLUDED.cover_rate,
@@ -924,6 +966,7 @@ def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime)
             edge = EXCLUDED.edge,
             sample_size = EXCLUDED.sample_size,
             confidence = EXCLUDED.confidence,
+            coverage_profile_json = EXCLUDED.coverage_profile_json,
             computed_at = EXCLUDED.computed_at
     """)
 
@@ -941,6 +984,7 @@ def write_detected_patterns(engine, patterns: List[Dict], computed_at: datetime)
             'edge': p['edge'],
             'sample_size': p['sample_size'],
             'confidence': p['confidence'],
+            'coverage_profile_json': p.get('coverage_profile_json'),
             'computed_at': computed_at,
         })
 
@@ -1167,6 +1211,15 @@ def generate_todays_recommendations(engine, computed_at: datetime) -> int:
     if all_recommendations:
         written = write_todays_recommendations(engine, all_recommendations, today_est, computed_at)
         logger.info(f"  Wrote {written} recommendations to cache")
+
+        # Persist individual predictions for outcome tracking
+        try:
+            from src.analysis.prediction_tracking import write_prediction_tracking
+            tracked = write_prediction_tracking(engine, all_recommendations, today_est, computed_at)
+            logger.info(f"  Tracked {tracked} individual predictions")
+        except Exception as e:
+            logger.warning(f"  Error tracking predictions (non-fatal): {e}")
+
         return written
     else:
         logger.info("  No games scheduled today")

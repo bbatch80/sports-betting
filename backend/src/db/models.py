@@ -24,6 +24,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     UniqueConstraint,
 )
 
@@ -315,6 +316,9 @@ detected_patterns = Table(
     Column("sample_size", Integer),
     Column("confidence", String(10)),  # 'high', 'medium', 'low'
 
+    # Full coverage profile across all handicap levels for this (streak_type, streak_length)
+    Column("coverage_profile_json", Text),  # JSON: {"0": {"cover_rate": 0.42, ...}, "1": {...}, ...}
+
     # Timestamp
     Column("computed_at", DateTime),
 
@@ -392,6 +396,103 @@ todays_recommendations = Table(
 
 # Index for efficient lookups
 Index("idx_todays_rec_sport_date", todays_recommendations.c.sport, todays_recommendations.c.game_date)
+
+
+# =============================================================================
+# Prediction Results Table (individual bet tracking with outcomes)
+# =============================================================================
+
+prediction_results = Table(
+    "prediction_results",
+    metadata,
+    # Primary key
+    Column("id", Integer, primary_key=True, autoincrement=True),
+
+    # Game identification
+    Column("sport", String(50), nullable=False),
+    Column("game_date", Date, nullable=False),
+    Column("home_team", String(100), nullable=False),
+    Column("away_team", String(100), nullable=False),
+    Column("game_time", String(50)),
+
+    # Prediction-time lines (snapshot at ~6:30 AM when recommendation was generated)
+    Column("spread", Float),
+    Column("total", Float),
+    Column("home_team_total", Float),
+    Column("away_team_total", Float),
+
+    # Closing lines (DraftKings closing lines, filled at resolution from games table)
+    Column("closing_spread", Float),
+    Column("closing_total", Float),
+    Column("closing_home_tt", Float),
+    Column("closing_away_tt", Float),
+
+    # Team strength at recommendation time
+    Column("home_tier", String(20)),
+    Column("away_tier", String(20)),
+    Column("home_ats_rating", Float),
+    Column("away_ats_rating", Float),
+
+    # ATS streaks
+    Column("home_streak_length", Integer),
+    Column("home_streak_type", String(10)),
+    Column("away_streak_length", Integer),
+    Column("away_streak_type", String(10)),
+
+    # O/U streaks
+    Column("home_ou_streak_length", Integer),
+    Column("home_ou_streak_type", String(10)),
+    Column("away_ou_streak_length", Integer),
+    Column("away_ou_streak_type", String(10)),
+
+    # TT streaks
+    Column("home_tt_streak_length", Integer),
+    Column("home_tt_streak_type", String(10)),
+    Column("away_tt_streak_length", Integer),
+    Column("away_tt_streak_type", String(10)),
+
+    # Recommendation details
+    Column("bet_on", String(200), nullable=False),   # team name, "Game Total OVER", "Team TT OVER", etc.
+    Column("source", String(20), nullable=False),     # 'streak', 'ou_streak', 'tt_streak'
+    Column("edge", Float),
+    Column("confidence", String(10)),                 # 'high', 'medium', 'low'
+    Column("rationale", String(500)),
+    Column("handicap", Integer),
+
+    # Pattern details (from detected_patterns table)
+    Column("market_type", String(10)),                # 'ats', 'ou', 'tt'
+    Column("pattern_type", String(20)),               # 'streak_ride' or 'streak_fade'
+    Column("cover_rate", Float),
+    Column("baseline_rate", Float),
+    Column("sample_size", Integer),
+
+    # Derived columns (pre-computed for analysis)
+    Column("bet_is_home", Integer),                   # 1=home, 0=away, NULL=totals bet
+    Column("tier_matchup", String(40)),               # e.g. "Elite vs Weak"
+    Column("spread_bucket", String(20)),              # "PK-1", "1.5-3.5", "4-7", "7.5-10", "10+"
+    Column("rating_diff", Float),                     # home_ats_rating - away_ats_rating
+
+    # Outcome (filled at resolution)
+    Column("outcome", String(10)),                    # 'WIN', 'LOSS', 'PUSH', or NULL (unresolved)
+    Column("margin", Float),                          # how much we won/lost by (positive = good)
+    Column("home_score", Integer),
+    Column("away_score", Integer),
+
+    # Timestamps
+    Column("captured_at", DateTime),
+    Column("resolved_at", DateTime),
+
+    # Prevent duplicates if Lambda reruns
+    UniqueConstraint(
+        "sport", "game_date", "home_team", "away_team", "bet_on", "source",
+        name="uq_prediction_result"
+    ),
+)
+
+# Indexes for prediction results
+Index("idx_pred_results_sport_date", prediction_results.c.sport, prediction_results.c.game_date)
+Index("idx_pred_results_outcome", prediction_results.c.outcome)
+Index("idx_pred_results_source", prediction_results.c.source)
 
 
 # =============================================================================

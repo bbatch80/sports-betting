@@ -35,6 +35,27 @@ from .network_ratings import get_cached_rankings
 # Configuration
 # =============================================================================
 
+HANDICAP_TIERS = {
+    'ats': [
+        {'name': 'h0',  'label': 'H=0',  'handicap': 0},
+        {'name': 'h2',  'label': 'H=2',  'handicap': 2},
+        {'name': 'h5',  'label': 'H=5',  'handicap': 5},
+        {'name': 'h8',  'label': 'H=8',  'handicap': 8},
+    ],
+    'ou': [
+        {'name': 'h0',  'label': 'H=0',  'handicap': 0},
+        {'name': 'h3',  'label': 'H=3',  'handicap': 3},
+        {'name': 'h10', 'label': 'H=10', 'handicap': 10},
+        {'name': 'h14', 'label': 'H=14', 'handicap': 14},
+    ],
+    'tt': [
+        {'name': 'h0',  'label': 'H=0',  'handicap': 0},
+        {'name': 'h2',  'label': 'H=2',  'handicap': 2},
+        {'name': 'h5',  'label': 'H=5',  'handicap': 5},
+        {'name': 'h8',  'label': 'H=8',  'handicap': 8},
+    ],
+}
+
 SPORTS_CONFIG = {
     'NFL': 'americanfootball_nfl',
     'NBA': 'basketball_nba',
@@ -57,6 +78,7 @@ class BetRecommendation:
     confidence: str          # 'high', 'medium', 'low'
     rationale: str           # Human-readable explanation
     handicap: int            # Handicap level for the recommendation
+    tier_data: Optional[List[Dict]] = None  # Coverage stats at each handicap tier
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -420,6 +442,21 @@ def get_team_streak_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tu
 # Recommendation Logic
 # =============================================================================
 
+def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
+    """Build tier-level coverage stats from a pattern's coverage profile."""
+    if not pattern.coverage_profile:
+        return None
+    market = pattern.market_type or 'ats'
+    tiers = HANDICAP_TIERS.get(market, HANDICAP_TIERS['ats'])
+    result = []
+    for tier in tiers:
+        h = tier['handicap']
+        entry = pattern.coverage_profile.get(h)
+        if entry:
+            result.append({**tier, **entry})
+    return result if result else None
+
+
 def match_streak_patterns(
     team: str,
     opponent: str,
@@ -453,6 +490,7 @@ def match_streak_patterns(
             continue
 
         # Determine recommendation
+        tier_data = _build_tier_data(pattern)
         if pattern.pattern_type == 'streak_ride':
             # Bet ON this team
             rec = BetRecommendation(
@@ -461,7 +499,8 @@ def match_streak_patterns(
                 edge=abs(pattern.edge),
                 confidence=pattern.confidence,
                 rationale=f"{streak_length}-game ATS {streak_type.lower()} streak -> RIDE ({abs(pattern.edge):.1%} edge)",
-                handicap=pattern.handicap
+                handicap=pattern.handicap,
+                tier_data=tier_data,
             )
         else:
             # streak_fade: bet AGAINST this team by betting ON their opponent
@@ -471,7 +510,8 @@ def match_streak_patterns(
                 edge=abs(pattern.edge),
                 confidence=pattern.confidence,
                 rationale=f"Opponent on {streak_length}-game ATS {streak_type.lower()} streak -> FADE ({abs(pattern.edge):.1%} edge)",
-                handicap=pattern.handicap
+                handicap=pattern.handicap,
+                tier_data=tier_data,
             )
 
         recommendations.append(rec)
@@ -528,7 +568,8 @@ def match_ou_streak_patterns(
             edge=abs(pattern.edge),
             confidence=pattern.confidence,
             rationale=f"{team} on {streak_length}-game O/U {streak_type.lower()} streak -> {bet_direction} ({abs(pattern.edge):.1%} edge)",
-            handicap=pattern.handicap
+            handicap=pattern.handicap,
+            tier_data=_build_tier_data(pattern),
         )
 
         recommendations.append(rec)
@@ -580,7 +621,8 @@ def match_tt_streak_patterns(
             edge=abs(pattern.edge),
             confidence=pattern.confidence,
             rationale=f"{team} on {streak_length}-game TT {streak_type.lower()} streak -> TT {bet_direction} ({abs(pattern.edge):.1%} edge)",
-            handicap=pattern.handicap
+            handicap=pattern.handicap,
+            tier_data=_build_tier_data(pattern),
         )
 
         recommendations.append(rec)
@@ -879,7 +921,8 @@ def get_cached_recommendations(conn, sport: str = None) -> List[GameRecommendati
                         edge=r['edge'],
                         confidence=r['confidence'],
                         rationale=r['rationale'],
-                        handicap=r['handicap']
+                        handicap=r['handicap'],
+                        tier_data=r.get('tier_data'),
                     ))
             except (json.JSONDecodeError, KeyError):
                 pass
