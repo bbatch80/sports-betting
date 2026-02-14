@@ -443,17 +443,34 @@ def get_team_streak_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tu
 # =============================================================================
 
 def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
-    """Build tier-level coverage stats from a pattern's coverage profile."""
+    """Build tier-level coverage stats from a pattern's coverage profile.
+
+    The coverage_profile stores streak continuation (ride) rates.
+    For fade patterns, we flip the rates so the displayed stats reflect
+    the actual recommended bet direction (1 - continuation_rate).
+    """
     if not pattern.coverage_profile:
         return None
     market = pattern.market_type or 'ats'
+    is_fade = pattern.pattern_type == 'streak_fade'
     tiers = HANDICAP_TIERS.get(market, HANDICAP_TIERS['ats'])
     result = []
     for tier in tiers:
         h = tier['handicap']
         entry = pattern.coverage_profile.get(h)
         if entry:
-            result.append({**tier, **entry})
+            if is_fade:
+                # Flip: coverage_profile stores ride rates, but bet is in the opposite direction
+                flipped = {
+                    **tier,
+                    'cover_rate': round(1 - entry['cover_rate'], 4),
+                    'baseline_rate': round(1 - entry['baseline_rate'], 4),
+                    'edge': round(entry['baseline_rate'] - entry['cover_rate'], 4),
+                    'sample_size': entry['sample_size'],
+                }
+                result.append(flipped)
+            else:
+                result.append({**tier, **entry})
     return result if result else None
 
 
