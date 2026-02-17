@@ -466,26 +466,41 @@ def get_confidence(sample_size: int, edge: float) -> str:
     return 'low'
 
 
-def compute_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 15)) -> Dict[int, float]:
-    """Compute baseline cover rates at each handicap level."""
+def compute_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 15)) -> Dict[int, Dict[str, float]]:
+    """Compute baseline cover rates at each handicap for BOTH team and opponent directions.
+
+    Each game contributes one home and one away observation.
+    'team' rate = mixed home/away rate (same as what continuation computes).
+    'opp' rate = opponent covers at H (also mixed).
+
+    Returns: {handicap: {'team': rate, 'opp': rate}}
+    """
     baseline = {}
 
+    valid_games = [g for g in games if g.get('spread_result') is not None]
+    if not valid_games:
+        return baseline
+
     for handicap in range(handicap_range[0], handicap_range[1] + 1):
-        covers = 0
-        total = 0
+        home_covers = 0
+        away_covers = 0
+        total = len(valid_games)
 
-        for g in games:
-            spread_result = g.get('spread_result')
-            if spread_result is None:
-                continue
+        for g in valid_games:
+            sr = g['spread_result']
+            if (sr + handicap) > 0:
+                home_covers += 1
+            if (sr - handicap) < 0:
+                away_covers += 1
 
-            # Home team cover at this handicap
-            home_covered = (spread_result + handicap) > 0
-            total += 1
-            if home_covered:
-                covers += 1
+        # Mixed team rate = average of home and away (each game seen from both perspectives)
+        team_rate = (home_covers + away_covers) / (2 * total) if total > 0 else 0.5
+        opp_rate = team_rate  # symmetric: every team's opp is someone else's team
 
-        baseline[handicap] = covers / total if total > 0 else 0.5
+        baseline[handicap] = {
+            'team': team_rate,
+            'opp': opp_rate,
+        }
 
     return baseline
 
@@ -496,13 +511,13 @@ def compute_streak_continuation(
     streak_length: int,
     streak_type: str,
     handicap_range: Tuple[int, int] = (0, 15)
-) -> Dict[int, Tuple[int, int]]:
+) -> Dict[int, Tuple[int, int, int]]:
     """
-    Compute cover counts at each handicap for games following a streak.
+    Compute BOTH team and opponent cover counts for games following a streak.
 
-    Returns: {handicap: (covers, total)}
+    Returns: {handicap: (team_covers, opp_covers, total)}
     """
-    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+    results = {h: [0, 0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
 
     for team in teams:
         team_games = [g for g in games if g['home_team'] == team or g['away_team'] == team]
@@ -554,14 +569,19 @@ def compute_streak_continuation(
                 spread_result = next_game['spread_result']
 
                 for handicap in range(handicap_range[0], handicap_range[1] + 1):
+                    # Team covers at H (from team's perspective)
                     if is_home:
-                        covered = (spread_result + handicap) > 0
+                        team_covered = (spread_result + handicap) > 0
+                        opp_covered = (spread_result - handicap) < 0
                     else:
-                        covered = (spread_result - handicap) < 0
+                        team_covered = (spread_result - handicap) < 0
+                        opp_covered = (spread_result + handicap) > 0
 
-                    results[handicap][1] += 1  # total
-                    if covered:
-                        results[handicap][0] += 1  # covers
+                    results[handicap][2] += 1  # total
+                    if team_covered:
+                        results[handicap][0] += 1
+                    if opp_covered:
+                        results[handicap][1] += 1
 
     return {h: tuple(v) for h, v in results.items()}
 
@@ -576,7 +596,7 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
         teams.add(g['home_team'])
         teams.add(g['away_team'])
 
-    # Compute baseline
+    # Compute baseline (returns both team and opp directions)
     baseline = compute_baseline_coverage(games, cfg['handicap_range'])
 
     # Check each streak type and length
@@ -586,27 +606,37 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                 games, teams, streak_length, streak_type, cfg['handicap_range']
             )
 
-            # Build full coverage profile for this (streak_type, streak_length)
+            # Build full coverage profile storing BOTH team and opponent directions
             coverage_profile = {}
             for h in range(cfg['handicap_range'][0], cfg['handicap_range'][1] + 1):
-                covers, total = continuation[h]
+                team_covers, opp_covers, total = continuation[h]
                 if total >= 5:
+                    team_rate = team_covers / total
+                    opp_rate = opp_covers / total
+                    team_base = baseline[h]['team']
+                    opp_base = baseline[h]['opp']
+
                     coverage_profile[h] = {
-                        'cover_rate': round(covers / total, 4),
-                        'baseline_rate': round(baseline[h], 4),
-                        'edge': round((covers / total) - baseline[h], 4),
+                        'team_cover_rate': round(team_rate, 4),
+                        'opp_cover_rate': round(opp_rate, 4),
+                        'team_baseline': round(team_base, 4),
+                        'opp_baseline': round(opp_base, 4),
+                        # Backward-compat ride-direction fields
+                        'cover_rate': round(team_rate, 4),
+                        'baseline_rate': round(team_base, 4),
+                        'edge': round(team_rate - team_base, 4),
                         'sample_size': total,
                     }
             profile_json = json.dumps(coverage_profile) if coverage_profile else None
 
             for handicap in range(cfg['handicap_range'][0], cfg['handicap_range'][1] + 1):
-                covers, total = continuation[handicap]
+                team_covers, opp_covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
                     continue
 
-                cover_rate = covers / total
-                baseline_rate = baseline[handicap]
-                edge = cover_rate - baseline_rate
+                team_rate = team_covers / total
+                team_base = baseline[handicap]['team']
+                edge = team_rate - team_base
 
                 if abs(edge) < cfg['min_edge']:
                     continue
@@ -619,8 +649,8 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'streak_type': streak_type,
                     'streak_length': streak_length,
                     'handicap': handicap,
-                    'cover_rate': cover_rate,
-                    'baseline_rate': baseline_rate,
+                    'cover_rate': team_rate,
+                    'baseline_rate': team_base,
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),

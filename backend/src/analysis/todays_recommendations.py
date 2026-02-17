@@ -447,12 +447,14 @@ def get_team_streak_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tu
 def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
     """Build tier-level coverage stats from a pattern's coverage profile.
 
-    For ATS: coverage_profile stores ride rates. Fade flips with 1-rate
-    (valid because ATS covers are binary from one team's perspective).
+    All markets store both directions in the profile:
+    - ATS: team_cover_rate / opp_cover_rate
+    - O/U: over_cover_rate / under_cover_rate
+    - TT:  over_cover_rate / under_cover_rate
 
-    For O/U and TT: coverage_profile stores BOTH over and under rates.
-    We pick the correct bet direction directly (no flipping needed,
-    since OVER and UNDER are NOT complementary at H>0).
+    We pick the correct bet direction directly — no flipping needed.
+    At H>0, "team covers" and "opponent covers" (or OVER/UNDER) are NOT
+    complementary due to overlap zones, so 1-rate would be wrong.
     """
     if not pattern.coverage_profile:
         return None
@@ -463,34 +465,51 @@ def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
     for tier in tiers:
         h = tier['handicap']
         entry = pattern.coverage_profile.get(h)
-        if entry:
-            if market in ('ou', 'tt') and 'over_cover_rate' in entry:
-                # O/U and TT: use pre-computed directional rates
-                # Determine bet direction based on streak_type and ride/fade
-                if is_fade:
-                    bet_dir = 'under' if pattern.streak_type == 'OVER' else 'over'
-                else:
-                    bet_dir = 'over' if pattern.streak_type == 'OVER' else 'under'
+        if not entry:
+            continue
 
-                cover_rate = entry[f'{bet_dir}_cover_rate']
-                baseline_rate = entry[f'{bet_dir}_baseline']
+        if market in ('ou', 'tt') and 'over_cover_rate' in entry:
+            # O/U and TT: pick over or under based on bet direction
+            if is_fade:
+                bet_dir = 'under' if pattern.streak_type == 'OVER' else 'over'
+            else:
+                bet_dir = 'over' if pattern.streak_type == 'OVER' else 'under'
+
+            cover_rate = entry[f'{bet_dir}_cover_rate']
+            baseline_rate = entry[f'{bet_dir}_baseline']
+            result.append({
+                **tier,
+                'cover_rate': cover_rate,
+                'baseline_rate': baseline_rate,
+                'edge': round(cover_rate - baseline_rate, 4),
+                'sample_size': entry['sample_size'],
+            })
+        elif market == 'ats' and 'team_cover_rate' in entry:
+            # ATS: pick team or opponent based on ride/fade
+            if is_fade:
+                cover_rate = entry['opp_cover_rate']
+                baseline_rate = entry['opp_baseline']
+            else:
+                cover_rate = entry['team_cover_rate']
+                baseline_rate = entry['team_baseline']
+
+            result.append({
+                **tier,
+                'cover_rate': cover_rate,
+                'baseline_rate': baseline_rate,
+                'edge': round(cover_rate - baseline_rate, 4),
+                'sample_size': entry['sample_size'],
+            })
+        else:
+            # Legacy fallback (old profiles without directional fields)
+            if is_fade:
                 result.append({
-                    **tier,
-                    'cover_rate': cover_rate,
-                    'baseline_rate': baseline_rate,
-                    'edge': round(cover_rate - baseline_rate, 4),
-                    'sample_size': entry['sample_size'],
-                })
-            elif is_fade:
-                # ATS: flipping works (covers are binary per team)
-                flipped = {
                     **tier,
                     'cover_rate': round(1 - entry['cover_rate'], 4),
                     'baseline_rate': round(1 - entry['baseline_rate'], 4),
                     'edge': round(entry['baseline_rate'] - entry['cover_rate'], 4),
                     'sample_size': entry['sample_size'],
-                }
-                result.append(flipped)
+                })
             else:
                 result.append({**tier, **entry})
     return result if result else None
