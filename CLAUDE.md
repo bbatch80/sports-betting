@@ -211,8 +211,9 @@ sports-betting/
 |------|----------|---------|
 | 3:00 AM | evaluate_strategy_results | Match predictions to outcomes |
 | 6:00 AM | collect_yesterday_games | Get scores + closing spreads |
+| 6:10 AM | collect_todays_games | Fetch today's games + spreads from Odds API |
 | 6:15 AM | generate_historical_ratings | Compute daily rating snapshots |
-| 6:30 AM | generate_predictions | Create today's opportunities |
+| 6:30 AM | daily_precompute | Rankings, streaks, patterns, recommendations |
 | On-demand | predictions_api | Serve predictions to apps |
 | On-demand | results_api | Serve historical results |
 

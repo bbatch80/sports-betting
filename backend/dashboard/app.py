@@ -1573,7 +1573,7 @@ def page_todays_picks():
             key="todays_picks_sport_main"
         )
     with filter_col2:
-        handicap_options = ["All Handicaps", "H=0", "H=2 / H=3", "H=5 / H=10", "H=8 / H=14"]
+        handicap_options = ["All Handicaps", "H=0", "H=2 / H=3", "H=5 / H=10", "H=8 / H=14", "H=10"]
         handicap_view = st.selectbox("Handicap View", handicap_options, index=0, key="handicap_view")
 
     sport_to_use = picks_sport if picks_sport != "All" else "All"
@@ -1709,6 +1709,7 @@ def page_todays_picks():
                                 view_map = {
                                     "H=0": [0], "H=2 / H=3": [2, 3],
                                     "H=5 / H=10": [5, 10], "H=8 / H=14": [8, 14],
+                                    "H=10": [10],
                                 }
                                 highlight_handicaps = view_map.get(handicap_view, [])
                                 for idx, td in enumerate(show_tiers):
@@ -2536,218 +2537,534 @@ def page_prediction_results():
         st.info("No predictions tracked yet. Predictions are captured automatically when the daily precompute Lambda runs.")
         return
 
-    # --- Filters ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Prediction Filters")
+    # --- Filters (inline, uses global selected_sport from sidebar) ---
+    filtered = all_preds[all_preds['sport'] == selected_sport].copy()
 
-    # Sport filter (use global selected_sport)
-    pred_sports = sorted(all_preds['sport'].unique().tolist())
-    pred_sport = st.sidebar.selectbox("Pred Sport", pred_sports, index=pred_sports.index(selected_sport) if selected_sport in pred_sports else 0, key="pred_sport")
+    if filtered.empty:
+        st.info(f"No predictions tracked for {selected_sport}.")
+        return
 
-    filtered = all_preds[all_preds['sport'] == pred_sport].copy()
-
-    # Source filter
     sources = ["All"] + sorted(filtered['source'].dropna().unique().tolist())
-    sel_source = st.sidebar.selectbox("Source", sources, key="pred_source")
+    confidences = ["All"] + sorted(filtered['confidence'].dropna().unique().tolist())
+    min_date = pd.to_datetime(filtered['game_date']).min().date()
+    max_date = pd.to_datetime(filtered['game_date']).max().date()
+
+    fcol1, fcol2, fcol3 = st.columns([1, 1, 2])
+    with fcol1:
+        sel_source = st.selectbox("Source", sources, key="pred_source")
+    with fcol2:
+        sel_conf = st.selectbox("Confidence", confidences, key="pred_conf")
+    with fcol3:
+        all_time = st.checkbox("All-Time", value=True, key="pred_all_time")
+        if not all_time:
+            date_range = st.date_input("Date Range", value=(min_date, max_date), key="pred_dates")
+
     if sel_source != "All":
         filtered = filtered[filtered['source'] == sel_source]
-
-    # Confidence filter
-    confidences = ["All"] + sorted(filtered['confidence'].dropna().unique().tolist())
-    sel_conf = st.sidebar.selectbox("Confidence", confidences, key="pred_conf")
     if sel_conf != "All":
         filtered = filtered[filtered['confidence'] == sel_conf]
+    if not all_time and len(date_range) == 2:
+        filtered = filtered[
+            (pd.to_datetime(filtered['game_date']).dt.date >= date_range[0]) &
+            (pd.to_datetime(filtered['game_date']).dt.date <= date_range[1])
+        ]
 
-    # Date range
-    if not filtered.empty:
-        min_date = pd.to_datetime(filtered['game_date']).min().date()
-        max_date = pd.to_datetime(filtered['game_date']).max().date()
-        date_range = st.sidebar.date_input("Date Range", value=(min_date, max_date), key="pred_dates")
-        if len(date_range) == 2:
-            filtered = filtered[
-                (pd.to_datetime(filtered['game_date']).dt.date >= date_range[0]) &
-                (pd.to_datetime(filtered['game_date']).dt.date <= date_range[1])
-            ]
+    # --- Personal Handicap Toggle ---
+    # Typical handicap ranges per sport + market type (from -400 to -550 lines)
+    PERSONAL_H_RANGES = {
+        'NCAAM': {'ats': (7, 10), 'ou': (12, 16), 'tt': (7, 10)},
+        'NBA':   {'ats': (9, 11), 'ou': (14, 18), 'tt': (9, 11)},
+    }
+
+    use_personal = st.toggle("Use My Handicaps", value=False, key="use_personal_h")
+
+    if use_personal:
+        # --- Average Raw Margin by Category (cross-sport) ---
+        # Shows how much directional cushion each bet category has at H=0
+        all_resolved = all_preds[all_preds['outcome'].notna()].copy()
+        all_resolved['raw_margin'] = all_resolved['margin'] - all_resolved['handicap'].fillna(0)
+
+        # Derive bet direction from bet_on
+        def _bet_direction(row):
+            bo = str(row.get('bet_on', '')).upper()
+            if row['market_type'] == 'ats':
+                return 'Spread'
+            elif 'OVER' in bo:
+                return 'Over'
+            elif 'UNDER' in bo:
+                return 'Under'
+            return 'Other'
+
+        all_resolved['direction'] = all_resolved.apply(_bet_direction, axis=1)
+        all_resolved['category'] = all_resolved['sport'] + ' ' + all_resolved['market_type'].map(
+            {'ats': 'Spread', 'ou': 'Game Total', 'tt': 'Team Total'}
+        ).fillna('') + ' ' + all_resolved['direction']
+        # Clean up: "NCAAM Spread Spread" → "NCAAM Spread"
+        all_resolved['category'] = all_resolved['category'].str.replace('Spread Spread', 'Spread')
+
+        margin_summary = all_resolved.groupby('category').apply(
+            lambda g: pd.Series({
+                'N': len(g),
+                'Avg Raw Margin': round(g['raw_margin'].mean(), 1),
+                'Median': round(g['raw_margin'].median(), 1),
+                'Std Dev': round(g['raw_margin'].std(), 1) if len(g) > 1 else 0.0,
+                'Win% (H=0)': f"{(g['raw_margin'] > 0).sum() / max((g['raw_margin'] != 0).sum(), 1) * 100:.0f}%",
+            })
+        ).reset_index().rename(columns={'category': 'Category'})
+        margin_summary = margin_summary.sort_values('Category')
+
+        st.markdown("**Avg raw margin by category (H=0 baseline, all sports):**")
+        st.caption("Raw margin = how the bet performed with zero handicap. Positive = bet went your way.")
+        st.dataframe(margin_summary, hide_index=True, use_container_width=True)
 
     # Split into resolved vs unresolved
     resolved = filtered[filtered['outcome'].notna()].copy()
     unresolved = filtered[filtered['outcome'].isna()]
 
-    # --- Section 1: Summary Metrics ---
-    st.subheader("Performance Summary")
-
     if resolved.empty:
-        st.warning(f"No resolved predictions yet for {pred_sport}. Outcomes are filled after games complete.")
+        st.warning(f"No resolved predictions yet for {selected_sport}. Outcomes are filled after games complete.")
         if not unresolved.empty:
             st.info(f"{len(unresolved)} predictions pending resolution.")
         return
 
-    wins = (resolved['outcome'] == 'WIN').sum()
-    losses = (resolved['outcome'] == 'LOSS').sum()
-    pushes = (resolved['outcome'] == 'PUSH').sum()
-    total = wins + losses + pushes
-    win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
-    # ROI at -110 odds: win = +1 unit, loss = -1.1 units, push = 0
-    units = wins * 1.0 + losses * (-1.1) + pushes * 0
-    roi = units / total * 100 if total > 0 else 0
-
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Resolved", f"{total}", help=f"+{len(unresolved)} pending")
-    with col2:
-        st.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{wins}W-{losses}L-{pushes}P")
-    with col3:
-        st.metric("ROI (-110)", f"{roi:+.1f}%", delta=f"{units:+.1f} units")
-    with col4:
-        avg_edge_win = resolved[resolved['outcome'] == 'WIN']['edge'].mean()
-        avg_edge_loss = resolved[resolved['outcome'] == 'LOSS']['edge'].mean()
-        st.metric("Avg Edge (W)", f"{avg_edge_win:.1%}" if pd.notna(avg_edge_win) else "N/A",
-                  help=f"Losers avg: {avg_edge_loss:.1%}" if pd.notna(avg_edge_loss) else "")
-
-    # --- Section 2: Cumulative Performance Chart ---
-    st.subheader("Cumulative Performance")
-
+    # Pre-compute shared data
     resolved['game_date_dt'] = pd.to_datetime(resolved['game_date'])
-    daily = resolved.sort_values('game_date_dt').copy()
 
-    # Calculate cumulative units
-    daily['unit_result'] = daily['outcome'].map({'WIN': 1.0, 'LOSS': -1.1, 'PUSH': 0.0})
-    daily['is_win'] = (daily['outcome'] == 'WIN').astype(int)
-    daily['is_decided'] = (daily['outcome'].isin(['WIN', 'LOSS'])).astype(int)
+    # Compute raw margin (strip out system handicap) — reusable for personal H
+    resolved['raw_margin'] = resolved['margin'] - resolved['handicap'].fillna(0)
 
-    # Group by date for cumulative chart
-    by_date = daily.groupby('game_date_dt').agg(
-        units=('unit_result', 'sum'),
-        wins=('is_win', 'sum'),
-        decided=('is_decided', 'sum'),
-    ).reset_index()
-    by_date['cum_units'] = by_date['units'].cumsum()
-    by_date['cum_wins'] = by_date['wins'].cumsum()
-    by_date['cum_decided'] = by_date['decided'].cumsum()
-    by_date['cum_win_rate'] = (by_date['cum_wins'] / by_date['cum_decided'] * 100).round(1)
+    # Re-evaluate outcomes at personal handicaps
+    selected_personal_h = None
+    if use_personal:
+        ranges = PERSONAL_H_RANGES.get(selected_sport, {'ats': (0, 0), 'ou': (0, 0), 'tt': (0, 0)})
 
-    chart_metric = st.radio("Chart metric", ["Cumulative Units", "Cumulative Win Rate %"], horizontal=True, key="perf_metric")
+        # Build a performance table for each H value in the range
+        # Collect all unique H values across all three market types
+        all_h_values = set()
+        for mkt, (lo, hi) in ranges.items():
+            all_h_values.update(range(lo, hi + 1))
+        all_h_values = sorted(all_h_values)
 
-    fig = go.Figure()
-    if chart_metric == "Cumulative Units":
-        fig.add_trace(go.Scatter(
-            x=by_date['game_date_dt'], y=by_date['cum_units'],
-            mode='lines+markers', name='Cumulative Units',
-            line=dict(color='#2ecc71' if by_date['cum_units'].iloc[-1] >= 0 else '#e74c3c', width=3),
-        ))
-        fig.add_hline(y=0, line_dash="dash", line_color="gray")
-        fig.update_yaxes(title_text="Units")
-    else:
-        fig.add_trace(go.Scatter(
-            x=by_date['game_date_dt'], y=by_date['cum_win_rate'],
-            mode='lines+markers', name='Win Rate %',
-            line=dict(color='#3498db', width=3),
-        ))
-        fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50%")
-        fig.update_yaxes(title_text="Win Rate %")
+        perf_rows = []
+        for h_val in all_h_values:
+            # For each market type, use h_val if it's in that market's range, else use the range bound
+            h_map = {}
+            for mkt, (lo, hi) in ranges.items():
+                h_map[mkt] = min(max(h_val, lo), hi)
 
-    fig.update_layout(xaxis_title="Date", height=400, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # --- Section 3: Win Rate by Dimension ---
-    st.subheader("Win Rate by Dimension")
-
-    dimension_options = {
-        "confidence": "Confidence",
-        "source": "Source",
-        "market_type": "Market Type",
-        "pattern_type": "Pattern (Ride/Fade)",
-        "tier_matchup": "Tier Matchup",
-        "spread_bucket": "Spread Bucket",
-        "bet_is_home": "Home/Away Bet",
-        "handicap": "Handicap",
-    }
-    sel_dim = st.selectbox("Group by", list(dimension_options.keys()),
-                           format_func=lambda x: dimension_options[x], key="pred_dim")
-
-    dim_data = resolved.copy()
-    if sel_dim == "bet_is_home":
-        dim_data['bet_is_home'] = dim_data['bet_is_home'].map({1: 'Home', 0: 'Away'})
-
-    dim_data = dim_data[dim_data[sel_dim].notna()]
-    if not dim_data.empty:
-        grouped = dim_data.groupby(sel_dim).apply(
-            lambda g: pd.Series({
-                'wins': (g['outcome'] == 'WIN').sum(),
-                'losses': (g['outcome'] == 'LOSS').sum(),
-                'total': len(g),
-                'win_rate': (g['outcome'] == 'WIN').sum() / max((g['outcome'].isin(['WIN', 'LOSS'])).sum(), 1) * 100,
+            new_h = resolved['market_type'].map(h_map).fillna(0)
+            new_margin = (resolved['raw_margin'] + new_h).round(1)
+            w = int((new_margin > 0).sum())
+            l = int((new_margin < 0).sum())
+            p = int((new_margin == 0).sum())
+            wr = w / max(w + l, 1) * 100
+            units = round(w * 1.0 + l * -1.1, 1)
+            perf_rows.append({
+                'H': h_val,
+                'ATS': h_map.get('ats', '-'),
+                'O/U': h_map.get('ou', '-'),
+                'TT': h_map.get('tt', '-'),
+                'W': w, 'L': l, 'P': p,
+                'Win%': f"{wr:.1f}%",
+                'Units': f"{units:+.1f}",
             })
-        ).reset_index()
 
-        fig_dim = go.Figure()
-        fig_dim.add_trace(go.Bar(
-            x=grouped[sel_dim].astype(str),
-            y=grouped['win_rate'],
-            text=[f"{wr:.0f}%<br>(n={n})" for wr, n in zip(grouped['win_rate'], grouped['total'])],
-            textposition='outside',
-            marker_color=['#2ecc71' if wr >= 50 else '#e74c3c' for wr in grouped['win_rate']],
-        ))
-        fig_dim.add_hline(y=50, line_dash="dash", line_color="gray")
-        fig_dim.update_layout(
-            xaxis_title=dimension_options[sel_dim],
-            yaxis_title="Win Rate %",
-            yaxis=dict(range=[0, max(grouped['win_rate'].max() + 15, 60)]),
-            height=400,
+        perf_df = pd.DataFrame(perf_rows)
+
+        st.markdown("**Performance at each handicap in your range:**")
+
+        def highlight_perf_row(row):
+            units_val = float(row['Units'])
+            if units_val > 0:
+                return ['background-color: rgba(46, 204, 113, 0.15)'] * len(row)
+            elif units_val < 0:
+                return ['background-color: rgba(231, 76, 60, 0.15)'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(perf_df.style.apply(highlight_perf_row, axis=1), hide_index=True, use_container_width=True)
+
+        # Let user pick which H to apply to the rest of the page
+        selected_h_idx = st.selectbox(
+            "Apply handicap to page",
+            range(len(all_h_values)),
+            format_func=lambda i: (
+                f"H={all_h_values[i]} — "
+                f"ATS:{perf_rows[i]['ATS']} O/U:{perf_rows[i]['O/U']} TT:{perf_rows[i]['TT']} — "
+                f"{perf_rows[i]['W']}W-{perf_rows[i]['L']}L ({perf_rows[i]['Win%']}) {perf_rows[i]['Units']}u"
+            ),
+            key="personal_h_select",
         )
-        st.plotly_chart(fig_dim, use_container_width=True)
-    else:
-        st.info(f"No data for dimension: {dimension_options[sel_dim]}")
+        selected_personal_h = perf_rows[selected_h_idx]
 
-    # --- Section 4: Winners vs Losers Comparison ---
-    st.subheader("Winners vs Losers")
+        # Apply selected handicap to resolved data
+        h_map_apply = {
+            'ats': selected_personal_h['ATS'],
+            'ou': selected_personal_h['O/U'],
+            'tt': selected_personal_h['TT'],
+        }
+        personal_h = resolved['market_type'].map(h_map_apply).fillna(0)
+        resolved['margin'] = (resolved['raw_margin'] + personal_h).round(1)
+        resolved['handicap'] = personal_h.astype(int)
+        resolved.loc[resolved['margin'] > 0, 'outcome'] = 'WIN'
+        resolved.loc[resolved['margin'] < 0, 'outcome'] = 'LOSS'
+        resolved.loc[resolved['margin'] == 0, 'outcome'] = 'PUSH'
 
-    win_df = resolved[resolved['outcome'] == 'WIN']
-    loss_df = resolved[resolved['outcome'] == 'LOSS']
+    # =====================================================================
+    # Two-tab layout
+    # =====================================================================
+    tab_overview, tab_daily, tab_losses = st.tabs(["All-Time Overview", "Daily Results", "All Losses"])
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("**Winners**")
-        st.caption(f"n = {len(win_df)}")
-        if not win_df.empty:
-            st.write(f"Avg Edge: {win_df['edge'].mean():.1%}" if win_df['edge'].notna().any() else "Avg Edge: N/A")
-            st.write(f"Avg Margin: {win_df['margin'].mean():+.1f}")
-            st.write(f"Avg |Spread|: {win_df['spread'].abs().mean():.1f}" if win_df['spread'].notna().any() else "")
-            st.write(f"Avg Rating Diff: {win_df['rating_diff'].mean():+.2f}" if win_df['rating_diff'].notna().any() else "")
-            if win_df['confidence'].notna().any():
-                conf_dist = win_df['confidence'].value_counts(normalize=True)
-                st.write("Confidence: " + ", ".join(f"{k} {v:.0%}" for k, v in conf_dist.items()))
+    # =================================================================
+    # Tab 1: All-Time Overview
+    # =================================================================
+    with tab_overview:
 
-    with col2:
-        st.markdown("**Losers**")
-        st.caption(f"n = {len(loss_df)}")
-        if not loss_df.empty:
-            st.write(f"Avg Edge: {loss_df['edge'].mean():.1%}" if loss_df['edge'].notna().any() else "Avg Edge: N/A")
-            st.write(f"Avg Margin: {loss_df['margin'].mean():+.1f}")
-            st.write(f"Avg |Spread|: {loss_df['spread'].abs().mean():.1f}" if loss_df['spread'].notna().any() else "")
-            st.write(f"Avg Rating Diff: {loss_df['rating_diff'].mean():+.2f}" if loss_df['rating_diff'].notna().any() else "")
-            if loss_df['confidence'].notna().any():
-                conf_dist = loss_df['confidence'].value_counts(normalize=True)
-                st.write("Confidence: " + ", ".join(f"{k} {v:.0%}" for k, v in conf_dist.items()))
+        # --- Summary Metrics ---
+        st.subheader("Performance Summary")
 
-    # --- Section 5: Detailed Results Table ---
-    st.subheader("Detailed Results")
+        wins = (resolved['outcome'] == 'WIN').sum()
+        losses = (resolved['outcome'] == 'LOSS').sum()
+        pushes = (resolved['outcome'] == 'PUSH').sum()
+        total = wins + losses + pushes
+        win_rate = wins / (wins + losses) * 100 if (wins + losses) > 0 else 0
+        units_total = wins * 1.0 + losses * (-1.1) + pushes * 0
+        roi = units_total / total * 100 if total > 0 else 0
 
-    display_cols = ['game_date', 'home_team', 'away_team', 'bet_on', 'source',
-                    'confidence', 'edge', 'handicap', 'outcome', 'margin']
-    display_df = resolved[display_cols].copy()
-    display_df['edge'] = display_df['edge'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "")
-    display_df['margin'] = display_df['margin'].apply(lambda x: f"{x:+.1f}" if pd.notna(x) else "")
-    display_df.columns = ['Date', 'Home', 'Away', 'Bet On', 'Source',
-                          'Conf', 'Edge', 'H', 'Result', 'Margin']
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Resolved", f"{total}", help=f"+{len(unresolved)} pending")
+        with col2:
+            st.metric("Win Rate", f"{win_rate:.1f}%", delta=f"{wins}W-{losses}L-{pushes}P")
+        with col3:
+            st.metric("ROI (-110)", f"{roi:+.1f}%", delta=f"{units_total:+.1f} units")
+        with col4:
+            avg_edge_win = resolved[resolved['outcome'] == 'WIN']['edge'].mean()
+            avg_edge_loss = resolved[resolved['outcome'] == 'LOSS']['edge'].mean()
+            st.metric("Avg Edge (W)", f"{avg_edge_win:.1%}" if pd.notna(avg_edge_win) else "N/A",
+                      help=f"Losers avg: {avg_edge_loss:.1%}" if pd.notna(avg_edge_loss) else "")
 
-    st.dataframe(display_df, hide_index=True, use_container_width=True)
+        # --- Cumulative Performance Chart ---
+        st.subheader("Cumulative Performance")
 
-    # Pending predictions
-    if not unresolved.empty:
-        with st.expander(f"Pending Predictions ({len(unresolved)})"):
-            pending_cols = ['game_date', 'home_team', 'away_team', 'bet_on', 'source', 'confidence', 'edge']
-            st.dataframe(unresolved[pending_cols], hide_index=True, use_container_width=True)
+        daily = resolved.sort_values('game_date_dt').copy()
+        daily['unit_result'] = daily['outcome'].map({'WIN': 1.0, 'LOSS': -1.1, 'PUSH': 0.0})
+        daily['is_win'] = (daily['outcome'] == 'WIN').astype(int)
+        daily['is_decided'] = (daily['outcome'].isin(['WIN', 'LOSS'])).astype(int)
+
+        by_date = daily.groupby('game_date_dt').agg(
+            units=('unit_result', 'sum'),
+            wins=('is_win', 'sum'),
+            decided=('is_decided', 'sum'),
+        ).reset_index()
+        by_date['cum_units'] = by_date['units'].cumsum()
+        by_date['cum_wins'] = by_date['wins'].cumsum()
+        by_date['cum_decided'] = by_date['decided'].cumsum()
+        by_date['cum_win_rate'] = (by_date['cum_wins'] / by_date['cum_decided'] * 100).round(1)
+
+        chart_metric = st.radio("Chart metric", ["Cumulative Units", "Cumulative Win Rate %"], horizontal=True, key="perf_metric")
+
+        fig = go.Figure()
+        if chart_metric == "Cumulative Units":
+            fig.add_trace(go.Scatter(
+                x=by_date['game_date_dt'], y=by_date['cum_units'],
+                mode='lines+markers', name='Cumulative Units',
+                line=dict(color='#2ecc71' if by_date['cum_units'].iloc[-1] >= 0 else '#e74c3c', width=3),
+            ))
+            fig.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig.update_yaxes(title_text="Units")
+        else:
+            fig.add_trace(go.Scatter(
+                x=by_date['game_date_dt'], y=by_date['cum_win_rate'],
+                mode='lines+markers', name='Win Rate %',
+                line=dict(color='#3498db', width=3),
+            ))
+            fig.add_hline(y=50, line_dash="dash", line_color="gray", annotation_text="50%")
+            fig.update_yaxes(title_text="Win Rate %")
+
+        fig.update_layout(xaxis_title="Date", height=400, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- Daily Record Table ---
+        st.subheader("Daily Record")
+
+        daily_summary = resolved.groupby('game_date_dt').apply(
+            lambda g: pd.Series({
+                'Picks': len(g),
+                'W': int((g['outcome'] == 'WIN').sum()),
+                'L': int((g['outcome'] == 'LOSS').sum()),
+                'Win%': (g['outcome'] == 'WIN').sum() / max((g['outcome'].isin(['WIN', 'LOSS'])).sum(), 1) * 100,
+                'Units': round((g['outcome'] == 'WIN').sum() * 1.0 + (g['outcome'] == 'LOSS').sum() * -1.1, 1),
+            })
+        ).reset_index().rename(columns={'game_date_dt': 'Date'})
+        daily_summary = daily_summary.sort_values('Date', ascending=False)
+        daily_summary['Date'] = daily_summary['Date'].dt.strftime('%Y-%m-%d')
+        daily_summary['Win%'] = daily_summary['Win%'].apply(lambda x: f"{x:.0f}%")
+        daily_summary['Units'] = daily_summary['Units'].apply(lambda x: f"{x:+.1f}")
+
+        def highlight_daily_row(row):
+            units_val = float(row['Units'])
+            if units_val > 0:
+                return ['background-color: rgba(46, 204, 113, 0.15)'] * len(row)
+            elif units_val < 0:
+                return ['background-color: rgba(231, 76, 60, 0.15)'] * len(row)
+            return [''] * len(row)
+
+        st.dataframe(
+            daily_summary.style.apply(highlight_daily_row, axis=1),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        # --- Win Rate by Dimension ---
+        st.subheader("Win Rate by Dimension")
+
+        dimension_options = {
+            "confidence": "Confidence",
+            "source": "Source",
+            "market_type": "Market Type",
+            "pattern_type": "Pattern (Ride/Fade)",
+            "tier_matchup": "Tier Matchup",
+            "spread_bucket": "Spread Bucket",
+            "bet_is_home": "Home/Away Bet",
+            "handicap": "Handicap",
+        }
+        sel_dim = st.selectbox("Group by", list(dimension_options.keys()),
+                               format_func=lambda x: dimension_options[x], key="pred_dim")
+
+        dim_data = resolved.copy()
+        if sel_dim == "bet_is_home":
+            dim_data['bet_is_home'] = dim_data['bet_is_home'].map({1: 'Home', 0: 'Away'})
+
+        dim_data = dim_data[dim_data[sel_dim].notna()]
+        if not dim_data.empty:
+            grouped = dim_data.groupby(sel_dim).apply(
+                lambda g: pd.Series({
+                    'wins': (g['outcome'] == 'WIN').sum(),
+                    'losses': (g['outcome'] == 'LOSS').sum(),
+                    'total': len(g),
+                    'win_rate': (g['outcome'] == 'WIN').sum() / max((g['outcome'].isin(['WIN', 'LOSS'])).sum(), 1) * 100,
+                })
+            ).reset_index()
+
+            fig_dim = go.Figure()
+            fig_dim.add_trace(go.Bar(
+                x=grouped[sel_dim].astype(str),
+                y=grouped['win_rate'],
+                text=[f"{wr:.0f}%<br>(n={n})" for wr, n in zip(grouped['win_rate'], grouped['total'])],
+                textposition='outside',
+                marker_color=['#2ecc71' if wr >= 50 else '#e74c3c' for wr in grouped['win_rate']],
+            ))
+            fig_dim.add_hline(y=50, line_dash="dash", line_color="gray")
+            fig_dim.update_layout(
+                xaxis_title=dimension_options[sel_dim],
+                yaxis_title="Win Rate %",
+                yaxis=dict(range=[0, max(grouped['win_rate'].max() + 15, 60)]),
+                height=400,
+            )
+            st.plotly_chart(fig_dim, use_container_width=True)
+        else:
+            st.info(f"No data for dimension: {dimension_options[sel_dim]}")
+
+    # =================================================================
+    # Tab 2: Daily Results
+    # =================================================================
+    with tab_daily:
+
+        # --- Date Selector ---
+        available_dates = sorted(resolved['game_date_dt'].dt.date.unique(), reverse=True)
+        date_labels = {}
+        for d in available_dates:
+            day_data = resolved[resolved['game_date_dt'].dt.date == d]
+            w = int((day_data['outcome'] == 'WIN').sum())
+            l = int((day_data['outcome'] == 'LOSS').sum())
+            date_labels[d] = f"{d.strftime('%b %d, %Y')} ({len(day_data)} resolved — {w}W-{l}L)"
+
+        selected_date = st.selectbox(
+            "Select Date", available_dates,
+            format_func=lambda d: date_labels[d],
+            key="daily_results_date",
+        )
+
+        # --- Day Summary Bar ---
+        day_preds = resolved[resolved['game_date_dt'].dt.date == selected_date].copy()
+        day_w = int((day_preds['outcome'] == 'WIN').sum())
+        day_l = int((day_preds['outcome'] == 'LOSS').sum())
+        day_total_decided = day_w + day_l
+        day_wr = day_w / day_total_decided * 100 if day_total_decided > 0 else 0
+        day_units = round(day_w * 1.0 + day_l * -1.1, 1)
+        units_color = "green" if day_units >= 0 else "red"
+
+        st.markdown(
+            f"**{selected_date.strftime('%B %d, %Y')}** — {selected_sport}: "
+            f"{day_w}-{day_l} ({day_wr:.1f}%) | "
+            f":{units_color}[{day_units:+.1f} units]"
+        )
+
+        # --- Game-by-Game Cards ---
+        source_icons = {'streak': '📈', 'ou_streak': '🔄', 'tt_streak': '👤'}
+
+        # Sort games: most predictions first, then alphabetically by away team
+        game_groups = list(day_preds.groupby(['home_team', 'away_team']))
+        game_groups.sort(key=lambda x: (-len(x[1]), x[0][1]))
+
+        for (home, away), game_group in game_groups:
+            g_wins = int((game_group['outcome'] == 'WIN').sum())
+            g_losses = int((game_group['outcome'] == 'LOSS').sum())
+            if g_losses == 0 and g_wins > 0:
+                game_icon = "✅"
+            elif g_wins == 0 and g_losses > 0:
+                game_icon = "❌"
+            else:
+                game_icon = "🔀"
+
+            with st.container():
+                st.markdown(f"#### {game_icon} {away} @ {home}")
+
+                # Score + lines info
+                row0 = game_group.iloc[0]
+                score_parts = []
+                if pd.notna(row0.get('away_score')) and pd.notna(row0.get('home_score')):
+                    score_parts.append(f"{away} {int(row0['away_score'])}, {home} {int(row0['home_score'])}")
+                if pd.notna(row0.get('closing_spread')):
+                    sp = row0['closing_spread']
+                    score_parts.append(f"Spread: {home} {'+' if sp > 0 else ''}{sp}")
+                elif pd.notna(row0.get('spread')):
+                    sp = row0['spread']
+                    score_parts.append(f"Spread: {home} {'+' if sp > 0 else ''}{sp}")
+                if pd.notna(row0.get('closing_total')):
+                    score_parts.append(f"Total: {row0['closing_total']}")
+                elif pd.notna(row0.get('total')):
+                    score_parts.append(f"Total: {row0['total']}")
+                tt_parts = []
+                if pd.notna(row0.get('closing_away_tt')):
+                    tt_parts.append(f"{away} {row0['closing_away_tt']}")
+                elif pd.notna(row0.get('away_team_total')):
+                    tt_parts.append(f"{away} {row0['away_team_total']}")
+                if pd.notna(row0.get('closing_home_tt')):
+                    tt_parts.append(f"{home} {row0['closing_home_tt']}")
+                elif pd.notna(row0.get('home_team_total')):
+                    tt_parts.append(f"{home} {row0['home_team_total']}")
+                if tt_parts:
+                    score_parts.append(f"TT: {' / '.join(tt_parts)}")
+                if score_parts:
+                    st.caption(" | ".join(score_parts))
+
+                # Each prediction as a line
+                for _, pred in game_group.iterrows():
+                    result_icon = "✅" if pred['outcome'] == 'WIN' else ("❌" if pred['outcome'] == 'LOSS' else "⚪")
+                    src_icon = source_icons.get(pred['source'], '📊')
+                    margin_str = f"{pred['margin']:+.1f}" if pd.notna(pred.get('margin')) else ""
+                    edge_str = f"{pred['edge']:.1%}" if pd.notna(pred.get('edge')) else "N/A"
+                    h_val = int(pred['handicap']) if pd.notna(pred.get('handicap')) else 0
+
+                    bet_line = f"{src_icon} **{pred['bet_on']}** — {result_icon} **{pred['outcome']}**"
+                    if margin_str:
+                        bet_line += f" ({margin_str} margin)"
+                    detail_line = (
+                        f"{pred['rationale'] or ''} | "
+                        f"Edge: {edge_str} | Conf: {pred['confidence']} | H={h_val}"
+                    )
+
+                    if pred['outcome'] == 'LOSS':
+                        st.markdown(
+                            f'<div style="background-color: rgba(231, 76, 60, 0.12); '
+                            f'border-left: 3px solid #e74c3c; padding: 8px 12px; '
+                            f'border-radius: 4px; margin-bottom: 8px;">'
+                            f'{bet_line}<br>'
+                            f'<span style="color: #888; font-size: 0.85em;">{detail_line}</span>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(bet_line)
+                        st.caption(detail_line)
+
+                st.markdown("---")
+
+        # --- Pending predictions for this date ---
+        day_unresolved = unresolved[pd.to_datetime(unresolved['game_date']).dt.date == selected_date]
+        if not day_unresolved.empty:
+            with st.expander(f"Pending Predictions ({len(day_unresolved)})"):
+                pending_cols = ['game_date', 'home_team', 'away_team', 'bet_on', 'source', 'confidence', 'edge']
+                st.dataframe(day_unresolved[pending_cols], hide_index=True, use_container_width=True)
+
+    # =================================================================
+    # Tab 3: All Losses
+    # =================================================================
+    with tab_losses:
+
+        losses_df = resolved[resolved['outcome'] == 'LOSS'].copy()
+
+        if losses_df.empty:
+            st.info("No losses recorded yet.")
+        else:
+            st.markdown(f"**{len(losses_df)} losses** — look for patterns below")
+
+            # --- Quick breakdown metrics ---
+            lc1, lc2, lc3, lc4 = st.columns(4)
+            with lc1:
+                avg_margin = losses_df['margin'].mean()
+                st.metric("Avg Margin", f"{avg_margin:+.1f}" if pd.notna(avg_margin) else "N/A")
+            with lc2:
+                avg_edge = losses_df['edge'].mean()
+                st.metric("Avg Edge", f"{avg_edge:.1%}" if pd.notna(avg_edge) else "N/A")
+            with lc3:
+                top_conf = losses_df['confidence'].value_counts().idxmax() if losses_df['confidence'].notna().any() else "N/A"
+                st.metric("Most Common Conf", top_conf)
+            with lc4:
+                top_source = losses_df['source'].value_counts().idxmax() if losses_df['source'].notna().any() else "N/A"
+                st.metric("Most Common Source", top_source)
+
+            # --- Loss breakdown charts ---
+            loss_dim_col1, loss_dim_col2 = st.columns(2)
+
+            with loss_dim_col1:
+                st.markdown("**Losses by Source**")
+                src_counts = losses_df['source'].value_counts()
+                fig_src = go.Figure(go.Bar(
+                    x=src_counts.index.tolist(),
+                    y=src_counts.values.tolist(),
+                    marker_color='#e74c3c',
+                    text=src_counts.values.tolist(),
+                    textposition='outside',
+                ))
+                fig_src.update_layout(height=300, xaxis_title="Source", yaxis_title="Losses", margin=dict(t=10))
+                st.plotly_chart(fig_src, use_container_width=True)
+
+            with loss_dim_col2:
+                st.markdown("**Losses by Confidence**")
+                conf_counts = losses_df['confidence'].value_counts()
+                fig_conf = go.Figure(go.Bar(
+                    x=conf_counts.index.tolist(),
+                    y=conf_counts.values.tolist(),
+                    marker_color='#e74c3c',
+                    text=conf_counts.values.tolist(),
+                    textposition='outside',
+                ))
+                fig_conf.update_layout(height=300, xaxis_title="Confidence", yaxis_title="Losses", margin=dict(t=10))
+                st.plotly_chart(fig_conf, use_container_width=True)
+
+            # --- Full losses table ---
+            st.markdown("**All Loss Details**")
+            loss_display = losses_df[[
+                'game_date', 'away_team', 'home_team', 'bet_on', 'source',
+                'confidence', 'edge', 'handicap', 'margin', 'rationale',
+                'pattern_type', 'tier_matchup', 'spread_bucket',
+            ]].copy()
+            loss_display['edge'] = loss_display['edge'].apply(lambda x: f"{x:.1%}" if pd.notna(x) else "")
+            loss_display['margin'] = loss_display['margin'].apply(lambda x: f"{x:+.1f}" if pd.notna(x) else "")
+            loss_display.columns = [
+                'Date', 'Away', 'Home', 'Bet On', 'Source',
+                'Conf', 'Edge', 'H', 'Margin', 'Rationale',
+                'Pattern', 'Tier Matchup', 'Spread Bucket',
+            ]
+            loss_display = loss_display.sort_values('Date', ascending=False)
+
+            st.dataframe(
+                loss_display,
+                hide_index=True,
+                use_container_width=True,
+            )
 
 
 # =============================================================================

@@ -630,25 +630,25 @@ def detect_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
     return patterns
 
 
-def compute_ou_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 20)) -> Dict[int, float]:
-    """Compute baseline O/U OVER cover rates at each handicap level."""
+def compute_ou_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 20)) -> Dict[int, Dict[str, float]]:
+    """Compute baseline O/U cover rates at each handicap for BOTH over and under directions.
+
+    Returns: {handicap: {'over': rate, 'under': rate}}
+    """
     baseline = {}
 
-    # Filter games with total_result
     valid_games = [g for g in games if g.get('total_result') is not None]
     if not valid_games:
         return baseline
 
+    total = len(valid_games)
     for handicap in range(handicap_range[0], handicap_range[1] + 1):
-        covers = 0
-        total = len(valid_games)
-
-        for g in valid_games:
-            # OVER covers when total_result + handicap > 0
-            if (g['total_result'] + handicap) > 0:
-                covers += 1
-
-        baseline[handicap] = covers / total if total > 0 else 0.5
+        over_covers = sum(1 for g in valid_games if (g['total_result'] + handicap) > 0)
+        under_covers = sum(1 for g in valid_games if (g['total_result'] - handicap) < 0)
+        baseline[handicap] = {
+            'over': over_covers / total if total > 0 else 0.5,
+            'under': under_covers / total if total > 0 else 0.5,
+        }
 
     return baseline
 
@@ -659,13 +659,13 @@ def compute_ou_streak_continuation(
     streak_length: int,
     streak_type: str,
     handicap_range: Tuple[int, int] = (0, 20)
-) -> Dict[int, Tuple[int, int]]:
+) -> Dict[int, Tuple[int, int, int]]:
     """
-    Compute OVER cover counts at each handicap for games following an O/U streak.
+    Compute BOTH over and under cover counts for games following an O/U streak.
 
-    Returns: {handicap: (covers, total)}
+    Returns: {handicap: (over_covers, under_covers, total)}
     """
-    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+    results = {h: [0, 0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
 
     target_is_over = (streak_type == 'OVER')
 
@@ -710,10 +710,13 @@ def compute_ou_streak_continuation(
             if streak_len >= streak_length:
                 total_result = game_data[i]['total_result']
                 for handicap in range(handicap_range[0], handicap_range[1] + 1):
-                    covered = (total_result + handicap) > 0  # OVER at this handicap
-                    results[handicap][1] += 1
-                    if covered:
+                    over_covered = (total_result + handicap) > 0
+                    under_covered = (total_result - handicap) < 0
+                    results[handicap][2] += 1  # total
+                    if over_covered:
                         results[handicap][0] += 1
+                    if under_covered:
+                        results[handicap][1] += 1
 
     return {h: tuple(v) for h, v in results.items()}
 
@@ -729,37 +732,52 @@ def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
         teams.add(g['home_team'])
         teams.add(g['away_team'])
 
+    # Compute baselines for both directions in one call
     baseline = compute_ou_baseline_coverage(games, ou_handicap_range)
     if not baseline:
         return patterns
 
     for streak_length in range(cfg['streak_range'][0], cfg['streak_range'][1] + 1):
         for streak_type in ['OVER', 'UNDER']:
+            ride_dir = 'over' if streak_type == 'OVER' else 'under'
+
             continuation = compute_ou_streak_continuation(
                 games, teams, streak_length, streak_type, ou_handicap_range
             )
 
-            # Build full coverage profile for this (streak_type, streak_length)
+            # Build full coverage profile storing BOTH directions
             coverage_profile = {}
             for h in range(ou_handicap_range[0], ou_handicap_range[1] + 1):
-                covers, total = continuation[h]
+                over_covers, under_covers, total = continuation[h]
                 if total >= 5:
+                    over_rate = over_covers / total
+                    under_rate = under_covers / total
+                    over_base = baseline[h]['over']
+                    under_base = baseline[h]['under']
+                    ride_rate = over_rate if ride_dir == 'over' else under_rate
+                    ride_base = over_base if ride_dir == 'over' else under_base
+
                     coverage_profile[h] = {
-                        'cover_rate': round(covers / total, 4),
-                        'baseline_rate': round(baseline.get(h, 0.5), 4),
-                        'edge': round((covers / total) - baseline.get(h, 0.5), 4),
+                        'over_cover_rate': round(over_rate, 4),
+                        'under_cover_rate': round(under_rate, 4),
+                        'over_baseline': round(over_base, 4),
+                        'under_baseline': round(under_base, 4),
+                        # Backward-compat ride-direction fields
+                        'cover_rate': round(ride_rate, 4),
+                        'baseline_rate': round(ride_base, 4),
+                        'edge': round(ride_rate - ride_base, 4),
                         'sample_size': total,
                     }
             profile_json = json.dumps(coverage_profile) if coverage_profile else None
 
             for handicap in range(ou_handicap_range[0], ou_handicap_range[1] + 1):
-                covers, total = continuation[handicap]
+                over_covers, under_covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
                     continue
 
-                cover_rate = covers / total
-                baseline_rate = baseline.get(handicap, 0.5)
-                edge = cover_rate - baseline_rate
+                ride_rate = (over_covers if ride_dir == 'over' else under_covers) / total
+                ride_base = baseline[handicap][ride_dir]
+                edge = ride_rate - ride_base
 
                 if abs(edge) < cfg['min_edge']:
                     continue
@@ -773,8 +791,8 @@ def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'streak_type': streak_type,
                     'streak_length': streak_length,
                     'handicap': handicap,
-                    'cover_rate': cover_rate,
-                    'baseline_rate': baseline_rate,
+                    'cover_rate': ride_rate,
+                    'baseline_rate': ride_base,
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),
@@ -784,8 +802,11 @@ def detect_ou_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
     return patterns
 
 
-def compute_tt_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 10)) -> Dict[int, float]:
-    """Compute baseline TT OVER cover rates at each handicap level."""
+def compute_tt_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, int] = (0, 10)) -> Dict[int, Dict[str, float]]:
+    """Compute baseline TT cover rates at each handicap for BOTH over and under directions.
+
+    Returns: {handicap: {'over': rate, 'under': rate}}
+    """
     baseline = {}
 
     # Pool all TT margins (home + away)
@@ -799,10 +820,14 @@ def compute_tt_baseline_coverage(games: List[Dict], handicap_range: Tuple[int, i
     if not all_margins:
         return baseline
 
+    total = len(all_margins)
     for handicap in range(handicap_range[0], handicap_range[1] + 1):
-        covers = sum(1 for m in all_margins if m > -handicap)
-        total = len(all_margins)
-        baseline[handicap] = covers / total if total > 0 else 0.5
+        over_covers = sum(1 for m in all_margins if m > -handicap)
+        under_covers = sum(1 for m in all_margins if m < handicap)
+        baseline[handicap] = {
+            'over': over_covers / total if total > 0 else 0.5,
+            'under': under_covers / total if total > 0 else 0.5,
+        }
 
     return baseline
 
@@ -813,15 +838,13 @@ def compute_tt_streak_continuation(
     streak_length: int,
     streak_type: str,
     handicap_range: Tuple[int, int] = (0, 10)
-) -> Dict[int, Tuple[int, int]]:
+) -> Dict[int, Tuple[int, int, int]]:
     """
-    Compute TT OVER cover counts at each handicap for games following a TT streak.
+    Compute BOTH over and under TT cover counts for games following a TT streak.
 
-    Uses ride direction: after OVER streak, check if next game TT margin > -h (OVER covers).
-
-    Returns: {handicap: (covers, total)}
+    Returns: {handicap: (over_covers, under_covers, total)}
     """
-    results = {h: [0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
+    results = {h: [0, 0, 0] for h in range(handicap_range[0], handicap_range[1] + 1)}
 
     target_is_over = (streak_type == 'OVER')
 
@@ -865,15 +888,13 @@ def compute_tt_streak_continuation(
             if streak_len >= streak_length:
                 margin = game_data[i]['margin']
                 for handicap in range(handicap_range[0], handicap_range[1] + 1):
-                    # Ride direction: OVER streak -> OVER covers if margin > -h
-                    if streak_type == 'OVER':
-                        covered = margin > -handicap
-                    else:  # UNDER streak -> UNDER covers if margin < h
-                        covered = margin < handicap
-
-                    results[handicap][1] += 1
-                    if covered:
+                    over_covered = margin > -handicap
+                    under_covered = margin < handicap
+                    results[handicap][2] += 1  # total
+                    if over_covered:
                         results[handicap][0] += 1
+                    if under_covered:
+                        results[handicap][1] += 1
 
     return {h: tuple(v) for h, v in results.items()}
 
@@ -889,37 +910,52 @@ def detect_tt_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
         teams.add(g['home_team'])
         teams.add(g['away_team'])
 
+    # Compute baselines for both directions in one call
     baseline = compute_tt_baseline_coverage(games, tt_handicap_range)
     if not baseline:
         return patterns
 
     for streak_length in range(cfg['streak_range'][0], cfg['streak_range'][1] + 1):
         for streak_type in ['OVER', 'UNDER']:
+            ride_dir = 'over' if streak_type == 'OVER' else 'under'
+
             continuation = compute_tt_streak_continuation(
                 games, teams, streak_length, streak_type, tt_handicap_range
             )
 
-            # Build full coverage profile for this (streak_type, streak_length)
+            # Build full coverage profile storing BOTH directions
             coverage_profile = {}
             for h in range(tt_handicap_range[0], tt_handicap_range[1] + 1):
-                covers, total = continuation[h]
+                over_covers, under_covers, total = continuation[h]
                 if total >= 5:
+                    over_rate = over_covers / total
+                    under_rate = under_covers / total
+                    over_base = baseline[h]['over']
+                    under_base = baseline[h]['under']
+                    ride_rate = over_rate if ride_dir == 'over' else under_rate
+                    ride_base = over_base if ride_dir == 'over' else under_base
+
                     coverage_profile[h] = {
-                        'cover_rate': round(covers / total, 4),
-                        'baseline_rate': round(baseline.get(h, 0.5), 4),
-                        'edge': round((covers / total) - baseline.get(h, 0.5), 4),
+                        'over_cover_rate': round(over_rate, 4),
+                        'under_cover_rate': round(under_rate, 4),
+                        'over_baseline': round(over_base, 4),
+                        'under_baseline': round(under_base, 4),
+                        # Backward-compat ride-direction fields
+                        'cover_rate': round(ride_rate, 4),
+                        'baseline_rate': round(ride_base, 4),
+                        'edge': round(ride_rate - ride_base, 4),
                         'sample_size': total,
                     }
             profile_json = json.dumps(coverage_profile) if coverage_profile else None
 
             for handicap in range(tt_handicap_range[0], tt_handicap_range[1] + 1):
-                covers, total = continuation[handicap]
+                over_covers, under_covers, total = continuation[handicap]
                 if total < cfg['min_sample']:
                     continue
 
-                cover_rate = covers / total
-                baseline_rate = baseline.get(handicap, 0.5)
-                edge = cover_rate - baseline_rate
+                ride_rate = (over_covers if ride_dir == 'over' else under_covers) / total
+                ride_base = baseline[handicap][ride_dir]
+                edge = ride_rate - ride_base
 
                 if abs(edge) < cfg['min_edge']:
                     continue
@@ -933,8 +969,8 @@ def detect_tt_patterns_for_sport(games: List[Dict], sport: str) -> List[Dict]:
                     'streak_type': streak_type,
                     'streak_length': streak_length,
                     'handicap': handicap,
-                    'cover_rate': cover_rate,
-                    'baseline_rate': baseline_rate,
+                    'cover_rate': ride_rate,
+                    'baseline_rate': ride_base,
                     'edge': edge,
                     'sample_size': total,
                     'confidence': get_confidence(total, edge),

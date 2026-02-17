@@ -587,17 +587,21 @@ def detect_ou_patterns(
     games_cache = {}
 
     for sport in ['NFL', 'NBA', 'NCAAM']:
-        # Get baseline O/U cover rates (OVER direction)
-        baseline = baseline_ou_coverage(conn, sport, handicap_range, direction='over')
-        if len(baseline) == 0:
+        # Pre-compute baselines for both directions
+        baseline_over = baseline_ou_coverage(conn, sport, handicap_range, direction='over')
+        baseline_under = baseline_ou_coverage(conn, sport, handicap_range, direction='under')
+        if len(baseline_over) == 0:
             continue
 
         for streak_length in range(streak_range[0], streak_range[1] + 1):
             for streak_type in ['OVER', 'UNDER']:
-                # Get O/U coverage after this streak (OVER direction)
+                # Ride direction = same as streak
+                ride_dir = streak_type.lower()
+                baseline = baseline_over if streak_type == 'OVER' else baseline_under
+
                 data = ou_streak_continuation_analysis(
                     conn, sport, streak_length, streak_type, handicap_range,
-                    direction='over', _all_games_cache=games_cache
+                    direction=ride_dir, _all_games_cache=games_cache
                 )
 
                 if len(data) == 0:

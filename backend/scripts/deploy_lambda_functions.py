@@ -34,7 +34,7 @@ LAMBDA_FUNCTIONS = {
         'memory': 256,   # MB
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
-        'schedule': 'cron(30 11 * * ? *)'  # 6:30 AM EST (11:30 UTC)
+        'schedule': 'cron(10 11 * * ? *)'  # 6:10 AM EST (11:10 UTC) - before daily-precompute
     },
     'generate-historical-ratings': {
         'description': 'Generates daily team rating snapshots for backtesting',
@@ -50,7 +50,7 @@ LAMBDA_FUNCTIONS = {
         'memory': 1024,  # MB (for iterative rating algorithm)
         'handler': 'lambda_function.lambda_handler',
         'runtime': 'python3.12',
-        'schedule': 'cron(20 11 * * ? *)',  # 6:20 AM EST (11:20 UTC) - after generate-historical-ratings
+        'schedule': 'cron(30 11 * * ? *)',  # 6:30 AM EST (11:30 UTC) - after collect-todays-games
         'include_src': True  # Bundle src/ package for recommendation generation
     },
     'schedule-closing-captures': {

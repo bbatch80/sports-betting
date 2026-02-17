@@ -41,6 +41,7 @@ HANDICAP_TIERS = {
         {'name': 'h2',  'label': 'H=2',  'handicap': 2},
         {'name': 'h5',  'label': 'H=5',  'handicap': 5},
         {'name': 'h8',  'label': 'H=8',  'handicap': 8},
+        {'name': 'h10', 'label': 'H=10', 'handicap': 10},
     ],
     'ou': [
         {'name': 'h0',  'label': 'H=0',  'handicap': 0},
@@ -53,6 +54,7 @@ HANDICAP_TIERS = {
         {'name': 'h2',  'label': 'H=2',  'handicap': 2},
         {'name': 'h5',  'label': 'H=5',  'handicap': 5},
         {'name': 'h8',  'label': 'H=8',  'handicap': 8},
+        {'name': 'h10', 'label': 'H=10', 'handicap': 10},
     ],
 }
 
@@ -445,9 +447,12 @@ def get_team_streak_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tu
 def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
     """Build tier-level coverage stats from a pattern's coverage profile.
 
-    The coverage_profile stores streak continuation (ride) rates.
-    For fade patterns, we flip the rates so the displayed stats reflect
-    the actual recommended bet direction (1 - continuation_rate).
+    For ATS: coverage_profile stores ride rates. Fade flips with 1-rate
+    (valid because ATS covers are binary from one team's perspective).
+
+    For O/U and TT: coverage_profile stores BOTH over and under rates.
+    We pick the correct bet direction directly (no flipping needed,
+    since OVER and UNDER are NOT complementary at H>0).
     """
     if not pattern.coverage_profile:
         return None
@@ -459,8 +464,25 @@ def _build_tier_data(pattern: InsightPattern) -> Optional[List[Dict]]:
         h = tier['handicap']
         entry = pattern.coverage_profile.get(h)
         if entry:
-            if is_fade:
-                # Flip: coverage_profile stores ride rates, but bet is in the opposite direction
+            if market in ('ou', 'tt') and 'over_cover_rate' in entry:
+                # O/U and TT: use pre-computed directional rates
+                # Determine bet direction based on streak_type and ride/fade
+                if is_fade:
+                    bet_dir = 'under' if pattern.streak_type == 'OVER' else 'over'
+                else:
+                    bet_dir = 'over' if pattern.streak_type == 'OVER' else 'under'
+
+                cover_rate = entry[f'{bet_dir}_cover_rate']
+                baseline_rate = entry[f'{bet_dir}_baseline']
+                result.append({
+                    **tier,
+                    'cover_rate': cover_rate,
+                    'baseline_rate': baseline_rate,
+                    'edge': round(cover_rate - baseline_rate, 4),
+                    'sample_size': entry['sample_size'],
+                })
+            elif is_fade:
+                # ATS: flipping works (covers are binary per team)
                 flipped = {
                     **tier,
                     'cover_rate': round(1 - entry['cover_rate'], 4),
