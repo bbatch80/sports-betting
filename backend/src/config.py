@@ -23,17 +23,9 @@ SPORTS = {
         'key': 'basketball_nba',
         'name': 'NBA',
     },
-    'nhl': {
-        'key': 'icehockey_nhl',
-        'name': 'NHL',
-    },
     'ncaam': {
         'key': 'basketball_ncaab',
         'name': 'NCAAM',
-    },
-    'ncaaf': {
-        'key': 'americanfootball_ncaaf',
-        'name': 'NCAAF',
     },
 }
 

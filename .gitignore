@@ -45,6 +45,9 @@ backend/lambda_functions/**/*.zip
 # Backend - Data files
 *.parquet
 backend/data/**/*.parquet
+backend/data/analytics.db
+backend/data/*_scores.json
+backend/data/results/
 
 # Backend - Logs and test output
 backend/logs/
