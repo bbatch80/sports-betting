@@ -2,7 +2,7 @@
 SQLAlchemy Engine factory with connection pooling.
 
 This module creates and manages the SQLAlchemy engine singleton.
-Configured for PostgreSQL only (no SQLite fallback).
+Configured for PostgreSQL via AWS RDS.
 
 Key concepts:
 - Singleton pattern: One engine instance shared across the application

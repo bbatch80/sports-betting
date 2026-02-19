@@ -12,7 +12,7 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
-import sqlite3
+from sqlalchemy.engine import Connection
 
 from ..database import get_games, get_all_teams
 from .metrics import (
@@ -94,7 +94,7 @@ def get_confidence(sample_size: int, edge: float) -> str:
 
 
 def detect_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05,
     streak_range: tuple = (2, 7),
@@ -222,7 +222,7 @@ def detect_ou_streak(team_games: pd.DataFrame) -> Tuple[int, str]:
     return (streak_length, streak_type or 'OVER')
 
 
-def get_current_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_current_ou_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get each team's current O/U streak (live computation).
 
@@ -268,7 +268,7 @@ def get_current_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, di
     return streaks
 
 
-def get_cached_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_cached_ou_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get pre-computed O/U streaks from current_ou_streaks table.
 
@@ -315,7 +315,7 @@ def get_cached_ou_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dic
 # Team Totals (Individual O/U) Streaks
 # =============================================================================
 
-def get_current_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_current_tt_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get each team's current team total O/U streak (live computation).
 
@@ -386,7 +386,7 @@ def get_current_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, di
 # ATS (Spread) Streaks
 # =============================================================================
 
-def get_current_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_current_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get each team's current ATS streak (live computation).
 
@@ -450,7 +450,7 @@ def get_current_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]
     return streaks
 
 
-def get_cached_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_cached_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get pre-computed streaks from current_streaks table.
 
@@ -495,7 +495,7 @@ def get_cached_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
 
 
 def get_cached_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05
 ) -> List[InsightPattern]:
@@ -560,7 +560,7 @@ def get_cached_patterns(
 
 
 def detect_ou_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05,
     streak_range: tuple = (2, 7),
@@ -636,7 +636,7 @@ def detect_ou_patterns(
 
 
 def detect_tt_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05,
     streak_range: tuple = (2, 7),
@@ -706,7 +706,7 @@ def detect_tt_patterns(
 
 
 def get_cached_ou_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05
 ) -> List[InsightPattern]:
@@ -771,7 +771,7 @@ def get_cached_ou_patterns(
 
 
 def get_cached_tt_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05
 ) -> List[InsightPattern]:
@@ -835,7 +835,7 @@ def get_cached_tt_patterns(
     return patterns
 
 
-def get_cached_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dict]:
+def get_cached_tt_streaks(conn: Connection, sport: str) -> Dict[str, dict]:
     """
     Get pre-computed TT streaks from current_tt_streaks table.
 
@@ -877,7 +877,7 @@ def get_cached_tt_streaks(conn: sqlite3.Connection, sport: str) -> Dict[str, dic
 
 
 def find_opportunities(
-    conn: sqlite3.Connection,
+    conn: Connection,
     patterns: List[InsightPattern],
     min_confidence: str = 'low'
 ) -> List[TodayOpportunity]:

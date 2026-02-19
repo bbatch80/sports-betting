@@ -15,7 +15,7 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
-import sqlite3
+from sqlalchemy.engine import Connection
 
 from sqlalchemy import text
 
@@ -70,7 +70,7 @@ class ThresholdResult:
 # Core Data Functions
 # =============================================================================
 
-def get_games_with_ratings(conn: sqlite3.Connection, sport: str) -> pd.DataFrame:
+def get_games_with_ratings(conn: Connection, sport: str) -> pd.DataFrame:
     """
     Join each game with both teams' pre-game ratings.
 
@@ -364,7 +364,7 @@ def backtest_rank_strategy(
 # Comprehensive Analysis
 # =============================================================================
 
-def generate_backtest_report(conn: sqlite3.Connection, sport: str) -> Dict:
+def generate_backtest_report(conn: Connection, sport: str) -> Dict:
     """
     Generate comprehensive backtest report for a sport.
 
@@ -449,7 +449,7 @@ def generate_backtest_report(conn: sqlite3.Connection, sport: str) -> Dict:
 
 
 def get_game_by_game_results(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     min_gap_diff: float = 0.1
 ) -> pd.DataFrame:

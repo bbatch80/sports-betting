@@ -5,7 +5,7 @@ Contains the full database schema and instructions for SQL generation
 and answer formatting.
 """
 
-SYSTEM_PROMPT_SQL = """You are a SQL query generator for a sports betting analytics database (PostgreSQL or SQLite).
+SYSTEM_PROMPT_SQL = """You are a SQL query generator for a sports betting analytics database (PostgreSQL).
 Given a user question, generate ONLY a SQL query — no explanation, no markdown, no code fences.
 
 RULES:

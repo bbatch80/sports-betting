@@ -13,7 +13,7 @@ Security Note:
 from dataclasses import dataclass, asdict
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta, timezone
-import sqlite3
+from sqlalchemy.engine import Connection
 import os
 
 try:
@@ -262,7 +262,7 @@ def format_game_time(commence_time: str) -> str:
 # Database-Backed Game Fetching
 # =============================================================================
 
-def get_todays_games_from_db(conn: sqlite3.Connection, sport: str) -> List[Dict]:
+def get_todays_games_from_db(conn: Connection, sport: str) -> List[Dict]:
     """
     Fetch today's games from the database (pre-collected by Lambda).
 
@@ -316,7 +316,7 @@ def get_todays_games_from_db(conn: sqlite3.Connection, sport: str) -> List[Dict]
         return []
 
 
-def get_games_last_updated(conn: sqlite3.Connection) -> Optional[datetime]:
+def get_games_last_updated(conn: Connection) -> Optional[datetime]:
     """
     Get the most recent update timestamp for today's games.
 
@@ -397,7 +397,7 @@ def get_closing_lines(conn, sport: str = None) -> Dict[Tuple[str, str, str], Dic
 # Team State Functions
 # =============================================================================
 
-def get_team_tier_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tuple[str, float]]:
+def get_team_tier_lookup(conn: Connection, sport: str) -> Dict[str, Tuple[str, float]]:
     """
     Build lookup of team -> (tier, ats_rating).
 
@@ -420,7 +420,7 @@ def get_team_tier_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tupl
     }
 
 
-def get_team_streak_lookup(conn: sqlite3.Connection, sport: str) -> Dict[str, Tuple[int, str]]:
+def get_team_streak_lookup(conn: Connection, sport: str) -> Dict[str, Tuple[int, str]]:
     """
     Build lookup of team -> (streak_length, streak_type).
 
@@ -694,7 +694,7 @@ def match_tt_streak_patterns(
 # =============================================================================
 
 def generate_recommendations(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     streak_patterns: List[InsightPattern],
     ou_patterns: List[InsightPattern] = None,

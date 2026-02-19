@@ -2,7 +2,7 @@
 Database operations repository.
 
 Provides a clean interface for all database operations, returning pandas DataFrames.
-Handles SQLite vs PostgreSQL differences internally (especially for upserts).
+Provides a clean interface for all database operations, returning pandas DataFrames.
 
 Usage:
     from src.database import AnalyticsRepository

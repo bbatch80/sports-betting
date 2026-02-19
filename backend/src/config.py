@@ -68,7 +68,7 @@ class DatabaseConfig:
     Database configuration for PostgreSQL.
 
     Loads DATABASE_URL from environment (auto-loads .env if present).
-    Errors immediately if DATABASE_URL is not set — no silent SQLite fallback.
+    Errors immediately if DATABASE_URL is not set.
 
     Example usage:
         config = DatabaseConfig.from_env()

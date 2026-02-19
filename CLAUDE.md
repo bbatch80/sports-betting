@@ -113,7 +113,7 @@ sports-betting/
 │   ├── scripts/                # Deployment & operations
 │   ├── migrations/             # DB migrations
 │   ├── notebooks/              # Jupyter analysis
-│   └── data/                   # Local SQLite + Excel
+│   └── data/                   # Local data files
 │
 ├── frontend/                   # React Native/Expo mobile app
 │   └── src/
@@ -144,13 +144,13 @@ sports-betting/
                 │                               │
                 ▼                               ▼
 ┌───────────────────────────────┐   ┌───────────────────────────────┐
-│       AWS API Gateway         │   │    Local SQLite Database      │
-│  GET /predictions/{sport}     │   │    backend/data/analytics.db  │
+│       AWS API Gateway         │   │    AWS RDS PostgreSQL         │
+│  GET /predictions/{sport}     │   │    sports-betting-analytics   │
 │  GET /results/{sport}         │   │                               │
-│  GET /strategy-performance    │   │         OR (production)       │
+│  GET /strategy-performance    │   │                               │
 └───────────────┬───────────────┘   │                               │
-                │                   │    AWS RDS PostgreSQL         │
-                ▼                   │    sports-betting-analytics   │
+                │                   │                               │
+                ▼                   │                               │
 ┌───────────────────────────────┐   └───────────────────────────────┘
 │      AWS Lambda Functions     │
 ├───────────────────────────────┤
@@ -235,7 +235,7 @@ Run with: `cd backend && streamlit run dashboard/app.py`
 
 ### Backend
 - **Language**: Python 3.12+
-- **Database**: SQLite (dev) / PostgreSQL (prod via AWS RDS)
+- **Database**: PostgreSQL (AWS RDS)
 - **ORM**: SQLAlchemy Core
 - **Cloud**: AWS (S3, Lambda, RDS, Secrets Manager, EventBridge, API Gateway)
 - **Data**: pandas, openpyxl, pyarrow

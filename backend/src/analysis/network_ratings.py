@@ -18,7 +18,7 @@ try:
     import pandas as pd
 except ImportError:
     pd = None
-import sqlite3
+from sqlalchemy.engine import Connection
 
 from sqlalchemy import text
 
@@ -226,7 +226,7 @@ def compute_ratings_at_date(
 
 
 def generate_historical_snapshots(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
@@ -347,7 +347,7 @@ def generate_historical_snapshots(
 
 
 def get_ratings_at_date(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     game_date: date
 ) -> Dict[str, 'TeamRatings']:
@@ -391,7 +391,7 @@ def get_ratings_at_date(
 
 
 def get_ratings_timeseries(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     team: str,
     start_date: Optional[date] = None,
@@ -486,7 +486,7 @@ def get_team_games_count(games_df: pd.DataFrame, team: str) -> int:
 # =============================================================================
 
 def get_team_rankings(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     min_games: int = 5,
     config: Optional[dict] = None
@@ -574,7 +574,7 @@ def get_team_rankings(
 
 
 def get_all_rankings(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_games: int = 5
 ) -> Dict[str, List[TeamRatings]]:
     """
@@ -590,7 +590,7 @@ def get_all_rankings(
 
 
 def get_cached_rankings(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     min_games: int = 5
 ) -> List[TeamRatings]:
@@ -647,7 +647,7 @@ def get_cached_rankings(
 
 
 def get_rankings_dataframe(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     min_games: int = 5
 ) -> pd.DataFrame:

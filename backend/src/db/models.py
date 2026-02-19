@@ -4,7 +4,7 @@ SQLAlchemy Table definitions using Core (not ORM).
 Why Core instead of ORM?
     The existing codebase uses pandas DataFrames for data manipulation.
     SQLAlchemy Core lets us:
-    - Define tables once, works for both SQLite and PostgreSQL
+    - Define tables once using SQLAlchemy Core
     - Use pd.read_sql() directly with SQLAlchemy connections
     - Avoid ORM overhead when we just need DataFrames
 
@@ -211,7 +211,7 @@ current_rankings = Table(
 
     # Context
     Column("games_analyzed", Integer),
-    Column("is_reliable", Integer),  # 1 or 0 (boolean as int for SQLite compat)
+    Column("is_reliable", Integer),  # 1 or 0
 
     # Timestamp
     Column("computed_at", DateTime),

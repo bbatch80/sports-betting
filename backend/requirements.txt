@@ -4,9 +4,9 @@ pandas>=2.0.0
 pyarrow>=14.0.0
 openpyxl>=3.1.0
 
-# Database (SQLAlchemy for dual SQLite/PostgreSQL support)
+# Database (PostgreSQL via SQLAlchemy)
 sqlalchemy>=2.0.0
-psycopg2-binary>=2.9.0  # PostgreSQL driver (not needed for SQLite-only)
+psycopg2-binary>=2.9.0
 
 # AI Research (natural language query via AWS Bedrock)
 boto3>=1.34.0

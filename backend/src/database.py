@@ -58,7 +58,7 @@ def get_connection(db_path: Optional[Path] = None, check_same_thread: bool = Tru
     """
     Get a database connection.
 
-    DEPRECATED: This returns a SQLAlchemy connection instead of sqlite3.
+    DEPRECATED: Use AnalyticsRepository instead.
     New code should use AnalyticsRepository instead.
 
     Note: The db_path and check_same_thread parameters are ignored.

@@ -27,7 +27,7 @@ try:
     import numpy as np
 except ImportError:
     np = None
-import sqlite3
+from sqlalchemy.engine import Connection
 
 from ..database import get_games
 from .backtest_ratings import get_games_with_ratings, BREAKEVEN_WIN_RATE, calculate_roi
@@ -151,7 +151,7 @@ def get_confidence(sample_size: int, edge: float, roi: float) -> str:
     return 'low'
 
 
-def baseline_handicap_coverage(conn: sqlite3.Connection, sport: str, handicap_range: tuple = (0, 15)) -> pd.DataFrame:
+def baseline_handicap_coverage(conn: Connection, sport: str, handicap_range: tuple = (0, 15)) -> pd.DataFrame:
     """
     Calculate baseline handicap coverage rates for a sport.
 
@@ -202,7 +202,7 @@ def baseline_handicap_coverage(conn: sqlite3.Connection, sport: str, handicap_ra
 # =============================================================================
 
 def detect_tier_matchup_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     sport: str,
     min_sample: int = 30,
     min_edge: float = 0.05,
@@ -341,7 +341,7 @@ def detect_tier_matchup_patterns(
 
 
 def detect_all_tier_matchup_patterns(
-    conn: sqlite3.Connection,
+    conn: Connection,
     min_sample: int = 30,
     min_edge: float = 0.05
 ) -> List[TierMatchupPattern]:
@@ -370,7 +370,7 @@ def detect_all_tier_matchup_patterns(
 # =============================================================================
 
 def find_tier_matchup_opportunities(
-    conn: sqlite3.Connection,
+    conn: Connection,
     patterns: List[TierMatchupPattern],
     min_confidence: str = 'low'
 ) -> List[TierMatchupOpportunity]:

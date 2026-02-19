@@ -178,7 +178,7 @@ def ask_question(
             try:
                 conn.execute(text("SET TRANSACTION READ ONLY"))
             except Exception:
-                pass  # SQLite doesn't support this — that's fine
+                pass  # Not all connections support SET TRANSACTION
 
             df = pd.read_sql(text(sql), conn)
     except Exception:
