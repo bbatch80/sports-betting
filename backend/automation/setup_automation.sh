@@ -25,7 +25,7 @@ else
 fi
 
 # Update the plist with correct paths
-sed -i '' "s|/Users/robertbatchelor/Documents/Projects/Sports Betting Analytics|$PROJECT_ROOT|g" "$TARGET_PLIST"
+sed -i '' "s|REPLACE_PROJECT_ROOT|$PROJECT_ROOT|g" "$TARGET_PLIST"
 echo "✓ Updated paths in plist file"
 
 # Load the launch agent

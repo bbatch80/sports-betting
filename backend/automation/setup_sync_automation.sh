@@ -20,7 +20,7 @@ echo "✓ Created logs directory"
 if [ -f "$PLIST_FILE" ]; then
     # Make a copy and update paths
     cp "$PLIST_FILE" "$PLIST_FILE.tmp"
-    sed "s|/Users/robertbatchelor/Documents/Projects/sports-betting/backend|$PROJECT_ROOT|g" "$PLIST_FILE.tmp" > "$PLIST_FILE.tmp2"
+    sed "s|REPLACE_PROJECT_ROOT|$PROJECT_ROOT|g" "$PLIST_FILE.tmp" > "$PLIST_FILE.tmp2"
     mv "$PLIST_FILE.tmp2" "$PLIST_FILE"
     rm -f "$PLIST_FILE.tmp"
     

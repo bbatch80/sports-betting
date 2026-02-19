@@ -40,8 +40,10 @@ cells.append(md_cell("""# Team Totals & Game Totals — Convergent Matchup Analy
 cells.append(code_cell("""import os, sys, warnings
 warnings.filterwarnings('ignore')
 from dotenv import load_dotenv
-load_dotenv('/Users/robertbatchelor/Projects/sports-betting/backend/.env')
-sys.path.insert(0, '/Users/robertbatchelor/Projects/sports-betting/backend')
+from pathlib import Path
+_backend = str(Path(__file__).resolve().parent.parent)
+load_dotenv(f'{_backend}/.env')
+sys.path.insert(0, _backend)
 
 import numpy as np
 import pandas as pd
@@ -352,7 +354,7 @@ notebook = {
     "nbformat": 4, "nbformat_minor": 5
 }
 
-out = '/Users/robertbatchelor/Projects/sports-betting/backend/notebooks/convergent_matchup_analysis.ipynb'
+out = str(Path(__file__).resolve().parent / 'convergent_matchup_analysis.ipynb')
 with open(out, 'w') as f:
     json.dump(notebook, f, indent=1)
 

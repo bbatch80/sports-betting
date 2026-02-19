@@ -5,8 +5,10 @@ Generates baseline coverage rates + convergent streak edge charts for NBA, NFL, 
 import os, sys, warnings
 warnings.filterwarnings('ignore')
 from dotenv import load_dotenv
-load_dotenv('/Users/robertbatchelor/Projects/sports-betting/backend/.env')
-sys.path.insert(0, '/Users/robertbatchelor/Projects/sports-betting/backend')
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(SCRIPT_DIR)
+load_dotenv(os.path.join(BACKEND_DIR, '.env'))
+sys.path.insert(0, BACKEND_DIR)
 
 import numpy as np
 import pandas as pd
@@ -15,7 +17,7 @@ import matplotlib.ticker as mticker
 from collections import defaultdict
 from src.db import AnalyticsRepository
 
-OUT = '/Users/robertbatchelor/Projects/sports-betting/backend/notebooks/visuals'
+OUT = os.path.join(SCRIPT_DIR, 'visuals')
 repo = AnalyticsRepository()
 
 plt.style.use('seaborn-v0_8-whitegrid')
