@@ -29,7 +29,10 @@ DEFAULT_REGIONS = ['us']
 def get_closing_odds(api_key: str, sport_key: str, event_id: str,
                      home_team: str, away_team: str, commence_time: str) -> tuple:
     """
-    Get closing spread, total, and team totals from DraftKings via historical odds endpoint.
+    Get closing spread, total, and team totals via historical odds endpoint.
+
+    Prefers DraftKings, falls back to the first available US bookmaker when DK
+    isn't in the API response (~10% of NCAAM games).
 
     Returns:
         tuple: (closing_spread, closing_total, home_team_total, away_team_total)
@@ -67,44 +70,71 @@ def get_closing_odds(api_key: str, sport_key: str, event_id: str,
         api_away = historical_odds['data'].get('away_team', '')
 
         bookmakers = historical_odds['data'].get('bookmakers', [])
-        closing_spread = None
-        closing_total = None
-        home_team_total = None
-        away_team_total = None
 
-        # Find DraftKings odds
+        # DraftKings-preferred values
+        dk_spread = None
+        dk_total = None
+        dk_home_tt = None
+        dk_away_tt = None
+
+        # Fallback values (first available bookmaker wins)
+        fb_spread = None
+        fb_total = None
+        fb_home_tt = None
+        fb_away_tt = None
+
         for bookmaker in bookmakers:
-            if 'draftkings' in bookmaker.get('key', '').lower():
-                for market in bookmaker.get('markets', []):
-                    # Extract spread — match home team to get home spread
-                    if market.get('key') == 'spreads' and closing_spread is None:
-                        outcomes = market.get('outcomes', [])
-                        for outcome in outcomes:
-                            if outcome.get('name', '') == api_home:
-                                closing_spread = outcome.get('point')
-                                break
+            is_dk = 'draftkings' in bookmaker.get('key', '').lower()
 
-                    # Extract total (Over/Under have same point value)
-                    elif market.get('key') == 'totals' and closing_total is None:
-                        outcomes = market.get('outcomes', [])
-                        for outcome in outcomes:
-                            if outcome.get('point') is not None:
-                                closing_total = outcome.get('point')
-                                break
+            for market in bookmaker.get('markets', []):
+                # Extract spread — match home team to get home spread
+                if market.get('key') == 'spreads':
+                    outcomes = market.get('outcomes', [])
+                    for outcome in outcomes:
+                        if outcome.get('name', '') == api_home:
+                            if is_dk:
+                                dk_spread = outcome.get('point')
+                            elif fb_spread is None:
+                                fb_spread = outcome.get('point')
+                            break
 
-                    # Extract team totals — match by description against API names
-                    elif market.get('key') == 'team_totals':
-                        outcomes = market.get('outcomes', [])
-                        for outcome in outcomes:
-                            if outcome.get('name', '').lower() != 'over' or outcome.get('point') is None:
-                                continue
-                            desc = outcome.get('description', '')
-                            if desc == api_home:
-                                home_team_total = outcome['point']
-                            elif desc == api_away:
-                                away_team_total = outcome['point']
+                # Extract total (Over/Under have same point value)
+                elif market.get('key') == 'totals':
+                    outcomes = market.get('outcomes', [])
+                    for outcome in outcomes:
+                        if outcome.get('point') is not None:
+                            if is_dk:
+                                dk_total = outcome.get('point')
+                            elif fb_total is None:
+                                fb_total = outcome.get('point')
+                            break
 
-                break  # Found DraftKings, stop looking
+                # Extract team totals — match by description against API names
+                elif market.get('key') == 'team_totals':
+                    outcomes = market.get('outcomes', [])
+                    for outcome in outcomes:
+                        if outcome.get('name', '').lower() != 'over' or outcome.get('point') is None:
+                            continue
+                        desc = outcome.get('description', '')
+                        if desc == api_home:
+                            if is_dk:
+                                dk_home_tt = outcome['point']
+                            elif fb_home_tt is None:
+                                fb_home_tt = outcome['point']
+                        elif desc == api_away:
+                            if is_dk:
+                                dk_away_tt = outcome['point']
+                            elif fb_away_tt is None:
+                                fb_away_tt = outcome['point']
+
+        # Prefer DraftKings, fall back to first available bookmaker
+        closing_spread = dk_spread if dk_spread is not None else fb_spread
+        closing_total = dk_total if dk_total is not None else fb_total
+        home_team_total = dk_home_tt if dk_home_tt is not None else fb_home_tt
+        away_team_total = dk_away_tt if dk_away_tt is not None else fb_away_tt
+
+        if dk_spread is None and fb_spread is not None:
+            logger.info(f"  Used fallback bookmaker for spread on {event_id}")
 
         return closing_spread, closing_total, home_team_total, away_team_total
     except Exception as e:

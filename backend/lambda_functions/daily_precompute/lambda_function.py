@@ -238,8 +238,10 @@ def compute_current_streak(games: List[Dict], team: str) -> Tuple[int, str]:
         is_home = game['home_team'] == team
         spread_result = game.get('spread_result')
 
-        if spread_result is None or spread_result == 0:
-            continue
+        if spread_result == 0:
+            continue  # Push — skip, doesn't break streak
+        if spread_result is None:
+            break  # Missing data — streak cannot continue through gap
 
         covered = (spread_result > 0) if is_home else (spread_result < 0)
 
@@ -276,8 +278,10 @@ def compute_current_ou_streak(games: List[Dict], team: str) -> Tuple[int, str]:
     for game in team_games:
         total_result = game.get('total_result')
 
-        if total_result is None or total_result == 0:
-            continue
+        if total_result == 0:
+            continue  # Push — skip, doesn't break streak
+        if total_result is None:
+            break  # Missing data — streak cannot continue through gap
 
         is_over = total_result > 0
 
@@ -315,8 +319,10 @@ def compute_current_tt_streak(games: List[Dict], team: str) -> Tuple[int, str]:
         is_home = game['home_team'] == team
         margin = game.get('home_team_total_result') if is_home else game.get('away_team_total_result')
 
-        if margin is None or margin == 0:
-            continue
+        if margin == 0:
+            continue  # Push — skip, doesn't break streak
+        if margin is None:
+            break  # Missing data — streak cannot continue through gap
 
         is_over = margin > 0
 
